@@ -1,13 +1,16 @@
 """
-Benchmark Qwen3 finetuning with and without Bastile.
+Benchmark Qwen3 finetuning: PyTorch vs Liger Kernel vs Bastile.
 
-Runs training with each configuration and compares throughput.
+Runs each configuration in a subprocess for clean isolation (Liger's
+monkey-patching persists across importlib.reload).
 """
 
+import sys
 import time
+import json
 import torch
 import gc
-import importlib
+import subprocess
 
 from ..utils import (
     clear_cuda_state,
@@ -15,116 +18,108 @@ from ..utils import (
     get_peak_memory_gb,
     print_header,
     print_gpu_info,
-    E2EBenchmarkResult,
 )
 
 
-def benchmark_training(use_bastile: bool, duration_seconds: float = 15.0) -> dict:
-    """
-    Benchmark Qwen3 training for a specified duration.
-    
-    Returns:
-        dict with iterations, throughput, avg_time_per_iter
-    """
-    clear_cuda_state()
-    
-    if use_bastile:
+# Standalone script that runs a single benchmark mode, outputs JSON result
+_BENCHMARK_SCRIPT = r'''
+import sys
+import time
+import json
+import torch
+import gc
+
+BATCH_SIZE = 4
+SEQ_LEN = 512
+
+def clear():
+    torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.synchronize()
+
+def run(mode, duration=15.0):
+    clear()
+
+    if mode == "bastile":
         import bastile
-        bastile.reset()
-        applied = bastile.apply(rms_norm=True, swiglu=True, rope=True)
-        print(f"  Bastile patches applied: {applied}")
-    
+        applied = bastile.apply(rms_norm=True, swiglu=True, rope=True, cross_entropy=True)
+        print(f"  Patches applied: {applied}", file=sys.stderr)
+    elif mode == "liger":
+        from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+        apply_liger_kernel_to_qwen3(
+            rope=True, rms_norm=True, swiglu=True,
+            fused_linear_cross_entropy=True,
+        )
+        print("  Liger patches: rope, rms_norm, swiglu, fused_linear_cross_entropy", file=sys.stderr)
+
     from transformers import Qwen3Config, Qwen3ForCausalLM
-    
+
     config = Qwen3Config(
-        vocab_size=32000,
-        hidden_size=1024,
-        intermediate_size=2048,
-        num_hidden_layers=4,
-        num_attention_heads=16,
-        num_key_value_heads=4,
-        hidden_act="silu",
-        max_position_embeddings=2048,
-        rms_norm_eps=1e-6,
-        tie_word_embeddings=False,
-        head_dim=64,
+        vocab_size=32000, hidden_size=1024, intermediate_size=2048,
+        num_hidden_layers=4, num_attention_heads=16, num_key_value_heads=4,
+        hidden_act="silu", max_position_embeddings=2048, rms_norm_eps=1e-6,
+        tie_word_embeddings=False, head_dim=64,
     )
-    
-    model = Qwen3ForCausalLM(config)
-    model = model.cuda().to(torch.bfloat16)
+
+    model = Qwen3ForCausalLM(config).cuda().to(torch.bfloat16)
     model.train()
-    
+
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"  Model: {num_params / 1e6:.1f}M parameters")
-    
+    print(f"  Model: {num_params / 1e6:.1f}M parameters", file=sys.stderr)
+    print(f"  Batch: {BATCH_SIZE} x {SEQ_LEN} = {BATCH_SIZE * SEQ_LEN} tokens/iter", file=sys.stderr)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-    
-    batch_size = 4
-    seq_len = 512
-    
-    input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len), device="cuda")
-    labels = torch.randint(0, config.vocab_size, (batch_size, seq_len), device="cuda")
+
+    input_ids = torch.randint(0, config.vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
+    labels = torch.randint(0, config.vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
     attention_mask = torch.ones_like(input_ids)
-    
-    print(f"  Batch: {batch_size} x {seq_len} = {batch_size * seq_len} tokens/iter")
-    
+
     # Warmup
-    print("  Warming up (5 iterations)...")
+    print("  Warming up (5 iterations)...", file=sys.stderr)
     for _ in range(5):
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         outputs.loss.backward()
         optimizer.step()
-    
+
     torch.cuda.synchronize()
-    reset_peak_memory()
-    
+    torch.cuda.reset_peak_memory_stats()
+
     # Benchmark
-    print(f"  Running benchmark for {duration_seconds:.0f} seconds...")
-    
+    print(f"  Running benchmark for {duration:.0f} seconds...", file=sys.stderr)
+
     iterations = 0
     total_tokens = 0
     iter_times = []
-    
     start_time = time.perf_counter()
-    
+
     while True:
         iter_start = time.perf_counter()
-        
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         outputs.loss.backward()
         optimizer.step()
-        
         torch.cuda.synchronize()
         iter_end = time.perf_counter()
-        
+
         iter_times.append(iter_end - iter_start)
         iterations += 1
-        total_tokens += batch_size * seq_len
-        
+        total_tokens += BATCH_SIZE * SEQ_LEN
+
         elapsed = iter_end - start_time
-        if elapsed >= duration_seconds:
+        if elapsed >= duration:
             break
-        
-        if iterations % 10 == 0:
-            tokens_per_sec = total_tokens / elapsed
-            print(f"    Iter {iterations}: {tokens_per_sec:.0f} tokens/sec, loss={outputs.loss.item():.4f}")
-    
+
+        if iterations % 100 == 0:
+            tps = total_tokens / elapsed
+            print(f"    Iter {iterations}: {tps:.0f} tok/s, loss={outputs.loss.item():.4f}", file=sys.stderr)
+
     total_time = time.perf_counter() - start_time
     avg_iter_time = sum(iter_times) / len(iter_times)
     tokens_per_sec = total_tokens / total_time
-    peak_memory = get_peak_memory_gb()
-    
-    # Cleanup
-    del model, optimizer
-    clear_cuda_state()
-    
-    if use_bastile:
-        import bastile
-        bastile.reset()
-    
-    return {
+    peak_memory = torch.cuda.max_memory_allocated() / 1024**3
+
+    result = {
         "iterations": iterations,
         "total_time": total_time,
         "avg_iter_time_ms": avg_iter_time * 1000,
@@ -132,66 +127,126 @@ def benchmark_training(use_bastile: bool, duration_seconds: float = 15.0) -> dic
         "peak_memory_gb": peak_memory,
         "final_loss": outputs.loss.item(),
     }
+    print(json.dumps(result))
+
+if __name__ == "__main__":
+    run(sys.argv[1], float(sys.argv[2]) if len(sys.argv) > 2 else 15.0)
+'''
+
+
+def run_benchmark_subprocess(mode: str, duration: float = 15.0) -> dict:
+    """Run a benchmark in a clean subprocess to avoid monkey-patch contamination."""
+    import tempfile
+    import os
+
+    # Write script to temp file
+    script_path = os.path.join(tempfile.gettempdir(), f"bench_{mode}.py")
+    with open(script_path, "w") as f:
+        f.write(_BENCHMARK_SCRIPT)
+
+    result = subprocess.run(
+        [sys.executable, script_path, mode, str(duration)],
+        capture_output=True,
+        text=True,
+        cwd="/workspace/bastile",
+        timeout=int(duration * 3 + 120),
+    )
+
+    # Print stderr (progress output)
+    if result.stderr:
+        for line in result.stderr.strip().split("\n"):
+            print(line)
+
+    if result.returncode != 0:
+        print(f"  ERROR: subprocess exited with code {result.returncode}")
+        if result.stderr:
+            # Show last few error lines
+            lines = result.stderr.strip().split("\n")
+            for line in lines[-10:]:
+                print(f"  {line}")
+        return None
+
+    # Parse JSON result from stdout
+    stdout_lines = result.stdout.strip().split("\n")
+    for line in reversed(stdout_lines):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+
+    print("  ERROR: no JSON result found in output")
+    return None
 
 
 def main():
-    print("=" * 70)
-    print("Qwen3 Finetuning Benchmark: Bastile vs PyTorch")
-    print("=" * 70)
-    
+    print("=" * 80)
+    print("Qwen3 Finetuning Benchmark: PyTorch vs Liger Kernel vs Bastile")
+    print("=" * 80)
+
     print_gpu_info()
-    
+    print("\n  (Each benchmark runs in a clean subprocess for isolation)\n")
+
     duration = 15.0
-    
-    # Benchmark WITHOUT Bastile
-    print_header("Benchmark 1: PyTorch (No Bastile)", 70)
-    
-    pytorch_results = benchmark_training(use_bastile=False, duration_seconds=duration)
-    
-    print(f"\n  Results:")
-    print(f"    Iterations: {pytorch_results['iterations']}")
-    print(f"    Avg time/iter: {pytorch_results['avg_iter_time_ms']:.1f} ms")
-    print(f"    Throughput: {pytorch_results['tokens_per_sec']:.0f} tokens/sec")
-    print(f"    Peak memory: {pytorch_results['peak_memory_gb']:.2f} GB")
-    
-    # Clear and reload
-    clear_cuda_state()
-    reset_peak_memory()
-    import transformers.models.qwen3.modeling_qwen3 as qwen3_module
-    importlib.reload(qwen3_module)
-    
-    # Benchmark WITH Bastile
-    print_header("Benchmark 2: Bastile (CuTile Kernels)", 70)
-    
-    bastile_results = benchmark_training(use_bastile=True, duration_seconds=duration)
-    
-    print(f"\n  Results:")
-    print(f"    Iterations: {bastile_results['iterations']}")
-    print(f"    Avg time/iter: {bastile_results['avg_iter_time_ms']:.1f} ms")
-    print(f"    Throughput: {bastile_results['tokens_per_sec']:.0f} tokens/sec")
-    print(f"    Peak memory: {bastile_results['peak_memory_gb']:.2f} GB")
-    
-    # Comparison
-    print_header("Comparison", 70)
-    
-    speedup = bastile_results['tokens_per_sec'] / pytorch_results['tokens_per_sec']
-    iter_speedup = pytorch_results['avg_iter_time_ms'] / bastile_results['avg_iter_time_ms']
-    memory_diff = bastile_results['peak_memory_gb'] - pytorch_results['peak_memory_gb']
-    
-    print(f"\n  PyTorch:  {pytorch_results['tokens_per_sec']:>8.0f} tokens/sec  |  {pytorch_results['avg_iter_time_ms']:>6.1f} ms/iter")
-    print(f"  Bastile:  {bastile_results['tokens_per_sec']:>8.0f} tokens/sec  |  {bastile_results['avg_iter_time_ms']:>6.1f} ms/iter")
-    print(f"  " + "-" * 50)
-    print(f"  Speedup:  {speedup:>8.2f}x throughput    |  {iter_speedup:>6.2f}x faster")
-    print(f"  Memory:   {memory_diff:>+8.2f} GB difference")
-    
-    if speedup > 1.0:
-        print(f"\n  Bastile is {(speedup - 1) * 100:.1f}% faster!")
-    elif speedup < 1.0:
-        print(f"\n  Bastile is {(1 - speedup) * 100:.1f}% slower")
-    else:
-        print(f"\n  No significant difference")
-    
-    print("\n" + "=" * 70)
+    results = {}
+
+    for mode, label in [
+        ("pytorch", "PyTorch (Baseline)"),
+        ("liger",   "Liger Kernel"),
+        ("bastile", "Bastile (CuTile Kernels)"),
+    ]:
+        print_header(f"Benchmark: {label}", 80)
+        r = run_benchmark_subprocess(mode, duration)
+        if r:
+            results[mode] = r
+            print(f"\n  Results:")
+            print(f"    Iterations: {r['iterations']}")
+            print(f"    Avg time/iter: {r['avg_iter_time_ms']:.1f} ms")
+            print(f"    Throughput: {r['tokens_per_sec']:.0f} tokens/sec")
+            print(f"    Peak memory: {r['peak_memory_gb']:.2f} GB")
+        else:
+            print(f"\n  FAILED — skipping {mode}")
+
+    # ---- Comparison ----
+    if len(results) < 2:
+        print("\nNot enough results for comparison.")
+        return
+
+    print_header("COMPARISON", 80)
+
+    py = results.get("pytorch")
+    lg = results.get("liger")
+    bt = results.get("bastile")
+
+    print(f"\n  {'':>20} {'Throughput':>14} {'ms/iter':>10} {'Memory':>10} {'vs PyTorch':>12} {'vs Liger':>12}")
+    print(f"  {'-'*78}")
+
+    if py:
+        print(f"  {'PyTorch':<20} {py['tokens_per_sec']:>10.0f} t/s "
+              f"{py['avg_iter_time_ms']:>8.1f}ms {py['peak_memory_gb']:>8.2f}GB "
+              f"{'baseline':>12} {'':>12}")
+    if lg:
+        vs_py = f"{lg['tokens_per_sec']/py['tokens_per_sec']:>11.2f}x" if py else ""
+        print(f"  {'Liger Kernel':<20} {lg['tokens_per_sec']:>10.0f} t/s "
+              f"{lg['avg_iter_time_ms']:>8.1f}ms {lg['peak_memory_gb']:>8.2f}GB "
+              f"{vs_py:>12} {'baseline':>12}")
+    if bt:
+        vs_py = f"{bt['tokens_per_sec']/py['tokens_per_sec']:>11.2f}x" if py else ""
+        vs_lg = f"{bt['tokens_per_sec']/lg['tokens_per_sec']:>11.2f}x" if lg else ""
+        print(f"  {'Bastile':<20} {bt['tokens_per_sec']:>10.0f} t/s "
+              f"{bt['avg_iter_time_ms']:>8.1f}ms {bt['peak_memory_gb']:>8.2f}GB "
+              f"{vs_py:>12} {vs_lg:>12}")
+
+    print()
+    if bt and py:
+        print(f"  Bastile vs PyTorch: {(bt['tokens_per_sec']/py['tokens_per_sec'] - 1)*100:+.1f}% throughput, "
+              f"{bt['peak_memory_gb'] - py['peak_memory_gb']:+.2f} GB memory")
+    if bt and lg:
+        print(f"  Bastile vs Liger:   {(bt['tokens_per_sec']/lg['tokens_per_sec'] - 1)*100:+.1f}% throughput, "
+              f"{bt['peak_memory_gb'] - lg['peak_memory_gb']:+.2f} GB memory")
+    if lg and py:
+        print(f"  Liger vs PyTorch:   {(lg['tokens_per_sec']/py['tokens_per_sec'] - 1)*100:+.1f}% throughput, "
+              f"{lg['peak_memory_gb'] - py['peak_memory_gb']:+.2f} GB memory")
+
+    print("\n" + "=" * 80)
 
 
 if __name__ == "__main__":

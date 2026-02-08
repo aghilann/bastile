@@ -85,6 +85,7 @@ def apply(
     gelu: bool = True,       # For GPT-OSS GEGLU
     relu: bool = True,
     moe: bool = True,        # Fused GEGLU MoE for GPT-OSS (+58% speedup)
+    cross_entropy: bool = True,  # Fused cross-entropy loss with in-place gradient
     model_type: Optional[str] = None,
 ) -> List[str]:
     """
@@ -124,6 +125,7 @@ def apply(
         'gelu': gelu,
         'relu': relu,
         'moe': moe,
+        'cross_entropy': cross_entropy,
     }
     
     applied = []

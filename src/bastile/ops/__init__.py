@@ -12,5 +12,6 @@ from . import rms_norm
 from . import swiglu
 from . import rope
 from . import gpt_oss_moe
+from . import cross_entropy
 
-__all__ = ['rms_norm', 'swiglu', 'rope', 'gpt_oss_moe']
+__all__ = ['rms_norm', 'swiglu', 'rope', 'gpt_oss_moe', 'cross_entropy']
