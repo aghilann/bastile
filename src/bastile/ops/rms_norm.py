@@ -10,34 +10,17 @@ Key optimizations:
 
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from ..registry import register_patch
 from ..autotune import autotune
+from .utils import next_power_of_2
+from .configs import RMSNormConfig
 
 import cuda.tile as ct
 
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
-
-
-def next_power_of_2(n: int) -> int:
-    """Return the smallest power of 2 >= n."""
-    if n <= 0:
-        return 1
-    return 1 << (n - 1).bit_length()
-
-
-@dataclass
-class RMSNormConfig:
-    """Configuration for RMSNorm kernel autotuning."""
-    use_static_persistent: bool
-    tile_size_m: int  # For persistent mode
-    tile_size_n: int  # Tile size for columns
-    
-    def __hash__(self):
-        return hash((self.use_static_persistent, self.tile_size_m, self.tile_size_n))
 
 
 def rms_norm_search_space(M: int, N: int, num_sms: int):

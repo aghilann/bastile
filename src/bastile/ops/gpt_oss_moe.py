@@ -15,11 +15,11 @@ This module provides:
 
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
 from typing import Optional
 
 from ..registry import register_patch
 from ..autotune import autotune, default_key
+from .configs import GEGLUConfig
 
 import cuda.tile as ct
 
@@ -29,17 +29,6 @@ LIMIT = 7.0
 
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
-
-
-@dataclass
-class GEGLUConfig:
-    """Configuration for GEGLU kernel."""
-    block_size: int
-    occupancy: int
-    use_float32: bool = True
-    
-    def __hash__(self):
-        return hash((self.block_size, self.occupancy, self.use_float32))
 
 
 def geglu_search_space():

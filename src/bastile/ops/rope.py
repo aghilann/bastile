@@ -9,35 +9,17 @@ Key optimizations:
 """
 
 import torch
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from ..registry import register_patch
 from ..autotune import autotune
+from .utils import next_power_of_2
+from .configs import RoPEConfig
 
 import cuda.tile as ct
 
 ConstInt = ct.Constant[int]
 PAD_ZERO = ct.PaddingMode.ZERO
-
-
-def next_power_of_2(n: int) -> int:
-    """Return the smallest power of 2 >= n."""
-    if n <= 0:
-        return 1
-    return 1 << (n - 1).bit_length()
-
-
-@dataclass
-class RoPEConfig:
-    """Configuration for RoPE kernel autotuning."""
-    tile_qh: int  # Tile size for query heads
-    tile_kh: int  # Tile size for key heads
-    tile_hd: int  # Tile size for head dimension
-    occupancy: int
-    
-    def __hash__(self):
-        return hash((self.tile_qh, self.tile_kh, self.tile_hd, self.occupancy))
 
 
 def rope_search_space(n_q_head: int, n_kv_head: int, head_dim: int):

@@ -10,37 +10,16 @@ Key optimizations:
 
 import torch
 import torch.nn as nn
-from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Callable
 
 from ..registry import register_patch
 from ..autotune import autotune
+from .utils import next_power_of_2, ceildiv
+from .configs import SwiGLUConfig
 
 import cuda.tile as ct
 
 ConstInt = ct.Constant[int]
-
-
-def next_power_of_2(n: int) -> int:
-    """Return the smallest power of 2 >= n."""
-    if n <= 0:
-        return 1
-    return 1 << (n - 1).bit_length()
-
-
-def ceildiv(a: int, b: int) -> int:
-    """Ceiling division."""
-    return -(a // -b)
-
-
-@dataclass
-class SwiGLUConfig:
-    """Configuration for SwiGLU kernel autotuning."""
-    tile_size: int
-    occupancy: int
-    
-    def __hash__(self):
-        return hash((self.tile_size, self.occupancy))
 
 
 def swiglu_search_space(n_cols: int):
