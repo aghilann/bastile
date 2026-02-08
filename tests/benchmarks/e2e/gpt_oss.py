@@ -1,7 +1,11 @@
 """
 Benchmark GPT-OSS finetuning with and without Bastile.
 
-Runs training with each configuration and compares throughput.
+GPT-OSS uses:
+- RMSNorm for normalization
+- GEGLU activation in MoE experts: (up + 1) * gate * sigmoid(gate * 1.702)
+
+Bastile provides optimized CuTile kernels for both operations.
 """
 
 import time
@@ -30,9 +34,8 @@ def benchmark_training(use_bastile: bool, duration_seconds: float = 15.0) -> dic
     if use_bastile:
         import bastile
         bastile.reset()
-        # GPT-OSS gets Fused GEGLU MoE Experts only
-        applied = bastile.apply(rms_norm=False, moe=True)
-        bastile.warmup_all_kernels()
+        # Apply all GPT-OSS optimizations: RMSNorm + RoPE + GEGLU MoE
+        applied = bastile.apply(rms_norm=True, moe=True, rope=True, swiglu=False)
         print(f"  Bastile patches applied: {applied}")
     
     from transformers import AutoConfig, AutoModelForCausalLM
