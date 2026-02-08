@@ -1,66 +1,58 @@
 """
-Benchmark GPT-OSS 20B finetuning with and without Bastile.
+Benchmark GPT-OSS finetuning with and without Bastile.
 
-Runs 1 minute of training with each configuration and compares throughput.
+Runs training with each configuration and compares throughput.
 """
 
 import time
 import torch
 import gc
+import importlib
+
+from ..utils import (
+    clear_cuda_state,
+    reset_peak_memory,
+    get_peak_memory_gb,
+    print_header,
+    print_gpu_info,
+)
 
 
-def benchmark_training(use_bastile: bool, duration_seconds: float = 60.0):
+def benchmark_training(use_bastile: bool, duration_seconds: float = 15.0) -> dict:
     """
     Benchmark GPT-OSS training for a specified duration.
     
     Returns:
         dict with iterations, throughput, avg_time_per_iter
     """
-    # Clear any previous state
-    torch.cuda.empty_cache()
-    gc.collect()
+    clear_cuda_state()
     
     if use_bastile:
         import bastile
-        bastile.reset()  # Ensure clean state
-        # GPT-OSS gets RMSNorm + Fused GEGLU MoE Experts
-        applied = bastile.apply(rms_norm=True, moe=True)
+        bastile.reset()
+        # GPT-OSS gets Fused GEGLU MoE Experts only
+        applied = bastile.apply(rms_norm=False, moe=True)
+        bastile.warmup_all_kernels()
         print(f"  Bastile patches applied: {applied}")
     
-    # Import after patching
     from transformers import AutoConfig, AutoModelForCausalLM
     
-    # Create model config - smaller version for benchmarking
     config = AutoConfig.from_pretrained("openai/gpt-oss-20b", trust_remote_code=True)
-    
-    # Scale down for faster benchmarking while keeping MoE structure
     config.hidden_size = 1024
     config.intermediate_size = 2048
     config.num_hidden_layers = 4
     config.num_attention_heads = 16
     config.num_key_value_heads = 4
-    # Keep MoE structure if present
     
-    # Create model
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     model = model.cuda().to(torch.bfloat16)
     model.train()
     
-    # Verify patches are applied (or not)
-    if use_bastile:
-        for name, module in model.named_modules():
-            if "input_layernorm" in name:
-                if "Bastile" in type(module).__name__:
-                    print(f"  ✓ Bastile modules active")
-                    break
-    
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {num_params / 1e6:.1f}M parameters")
     
-    # Setup optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     
-    # Create data
     batch_size = 4
     seq_len = 512
     
@@ -71,14 +63,16 @@ def benchmark_training(use_bastile: bool, duration_seconds: float = 60.0):
     print(f"  Batch: {batch_size} x {seq_len} = {batch_size * seq_len} tokens/iter")
     
     # Warmup
-    print("  Warming up (5 iterations)...")
-    for _ in range(5):
+    warmup_iters = 10
+    print(f"  Warming up ({warmup_iters} iterations)...")
+    for _ in range(warmup_iters):
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         outputs.loss.backward()
         optimizer.step()
     
     torch.cuda.synchronize()
+    reset_peak_memory()
     
     # Benchmark
     print(f"  Running benchmark for {duration_seconds:.0f} seconds...")
@@ -108,26 +102,18 @@ def benchmark_training(use_bastile: bool, duration_seconds: float = 60.0):
         if elapsed >= duration_seconds:
             break
         
-        # Progress update every 10 iterations
         if iterations % 10 == 0:
             tokens_per_sec = total_tokens / elapsed
             print(f"    Iter {iterations}: {tokens_per_sec:.0f} tokens/sec, loss={outputs.loss.item():.4f}")
     
-    end_time = time.perf_counter()
-    total_time = end_time - start_time
-    
-    # Calculate statistics
+    total_time = time.perf_counter() - start_time
     avg_iter_time = sum(iter_times) / len(iter_times)
     tokens_per_sec = total_tokens / total_time
-    
-    # Memory stats
-    torch.cuda.synchronize()
-    peak_memory = torch.cuda.max_memory_allocated() / 1024**3
+    peak_memory = get_peak_memory_gb()
     
     # Cleanup
     del model, optimizer
-    torch.cuda.empty_cache()
-    gc.collect()
+    clear_cuda_state()
     
     if use_bastile:
         import bastile
@@ -145,15 +131,15 @@ def benchmark_training(use_bastile: bool, duration_seconds: float = 60.0):
 
 def main():
     print("=" * 70)
-    print("GPT-OSS 20B Finetuning Benchmark: Bastile vs PyTorch")
+    print("GPT-OSS Finetuning Benchmark: Bastile vs PyTorch")
     print("=" * 70)
     
-    duration = 15.0  # 15 seconds each
+    print_gpu_info()
     
-    # Benchmark WITHOUT Bastile first
-    print("\n" + "=" * 70)
-    print("Benchmark 1: PyTorch (No Bastile)")
-    print("=" * 70)
+    duration = 15.0
+    
+    # Benchmark WITHOUT Bastile
+    print_header("Benchmark 1: PyTorch (No Bastile)", 70)
     
     pytorch_results = benchmark_training(use_bastile=False, duration_seconds=duration)
     
@@ -163,20 +149,14 @@ def main():
     print(f"    Throughput: {pytorch_results['tokens_per_sec']:.0f} tokens/sec")
     print(f"    Peak memory: {pytorch_results['peak_memory_gb']:.2f} GB")
     
-    # Clear GPU state
-    torch.cuda.empty_cache()
-    gc.collect()
-    torch.cuda.reset_peak_memory_stats()
-    
-    # Need to reimport transformers to get fresh classes
-    import importlib
+    # Clear and reload
+    clear_cuda_state()
+    reset_peak_memory()
     import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_module
     importlib.reload(gpt_oss_module)
     
     # Benchmark WITH Bastile
-    print("\n" + "=" * 70)
-    print("Benchmark 2: Bastile (CuTile Kernels)")
-    print("=" * 70)
+    print_header("Benchmark 2: Bastile (CuTile Kernels)", 70)
     
     bastile_results = benchmark_training(use_bastile=True, duration_seconds=duration)
     
@@ -187,9 +167,7 @@ def main():
     print(f"    Peak memory: {bastile_results['peak_memory_gb']:.2f} GB")
     
     # Comparison
-    print("\n" + "=" * 70)
-    print("Comparison")
-    print("=" * 70)
+    print_header("Comparison", 70)
     
     speedup = bastile_results['tokens_per_sec'] / pytorch_results['tokens_per_sec']
     iter_speedup = pytorch_results['avg_iter_time_ms'] / bastile_results['avg_iter_time_ms']
@@ -202,11 +180,11 @@ def main():
     print(f"  Memory:   {memory_diff:>+8.2f} GB difference")
     
     if speedup > 1.0:
-        print(f"\n  ✓ Bastile is {(speedup - 1) * 100:.1f}% faster!")
+        print(f"\n  Bastile is {(speedup - 1) * 100:.1f}% faster!")
     elif speedup < 1.0:
-        print(f"\n  ✗ Bastile is {(1 - speedup) * 100:.1f}% slower")
+        print(f"\n  Bastile is {(1 - speedup) * 100:.1f}% slower")
     else:
-        print(f"\n  = No significant difference")
+        print(f"\n  No significant difference")
     
     print("\n" + "=" * 70)
 

@@ -13,12 +13,12 @@ def run_all():
     print("Bastile Ops Unit Tests")
     print("=" * 70)
     print()
-    
+
     test_rms_norm.run_all()
     test_swiglu.run_all()
     test_geglu.run_all()
     test_rope.run_all()
-    
+
     print("=" * 70)
     print("✓ ALL OPS TESTS PASSED")
     print("=" * 70)

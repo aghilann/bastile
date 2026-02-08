@@ -1,143 +1,139 @@
 # Bastile
 
-**Monkey-patch PyTorch with optimized CuTile kernels for Qwen3 finetuning**
+Optimized CuTile kernels for finetuning HuggingFace models.
 
-Bastile automatically patches Qwen3 transformer operations with optimized CUDA kernels that support both forward and backward passes, enabling faster finetuning.
+## Performance Summary
+
+| Model | Speedup | Memory Saved | Key Optimization |
+|-------|---------|--------------|------------------|
+| **GPT-OSS 20B** | **+16%** | 0.61 GB | Fused GEGLU MoE kernel |
+
+**Key Insight**: Bastile excels at models with custom activations like GPT-OSS's GEGLU MoE. For 20%+ speedup on Qwen3, consider [Liger Kernel](https://github.com/linkedin/Liger-Kernel) which uses optimized Triton kernels.
 
 ## Installation
 
 ```bash
-# Requires PyTorch nightly with CUDA 13.0 support
-uv pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
-uv pip install cuda-tile
-uv pip install -e .
+pip install bastile
+# or
+uv add bastile
 ```
+
+**Requirements**: PyTorch nightly with CUDA 13.0+ support for CuTile.
 
 ## Quick Start
 
+### GPT-OSS 20B (Recommended - 16% speedup)
+
 ```python
 import bastile
 
-# Apply all optimized kernels before loading your model
+# Apply patches BEFORE loading model
 bastile.apply()
 
-# Load and finetune your model as usual
-from transformers import Qwen3ForCausalLM
-model = Qwen3ForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
+from transformers import AutoModelForCausalLM
+model = AutoModelForCausalLM.from_pretrained("openai/gpt-oss-20b")
 
-# Training works with full gradient support
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-loss = model(input_ids, labels=labels).loss
-loss.backward()  # Gradients flow through optimized kernels
-optimizer.step()
+# Train as usual - Bastile automatically uses optimized GEGLU MoE kernel
 ```
 
-## Selective Patching
+### Qwen3
 
 ```python
 import bastile
 
-# Apply only specific optimizations
+bastile.apply()
+
+from transformers import Qwen3ForCausalLM
+model = Qwen3ForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
+```
+
+## Optimizations
+
+### GPT-OSS (CuTile Kernels)
+
+| Operation | Speedup | Description |
+|-----------|---------|-------------|
+| **Fused GEGLU MoE** | +16% | Custom activation: `(up + 1) * gate * sigmoid(gate * 1.702)` |
+| RMSNorm | ~0% | RSTD caching for backward pass |
+
+### Qwen3
+
+| Operation | Status | Notes |
+|-----------|--------|-------|
+| RMSNorm | Disabled by default | PyTorch is faster for small models |
+| SwiGLU | Disabled by default | PyTorch is faster for small models |
+
+## API
+
+```python
+import bastile
+
+# Apply effective patches (moe by default for GPT-OSS)
+# This automatically warms up kernels to avoid JIT overhead during training
+bastile.apply()
+
+# Selective patching
 bastile.apply(
-    rms_norm=True,   # CuTile RMSNorm (forward + backward)
-    swiglu=True,     # CuTile SwiGLU MLP (forward + backward)
-    rope=True,       # RoPE with autograd support
+    rms_norm=False,  # Disabled - PyTorch is faster
+    swiglu=False,    # Disabled - PyTorch is faster
+    rope=False,      # Disabled - similar performance
+    moe=True,        # Enabled - +16% for GPT-OSS
 )
 
-# Check what's patched
-print(bastile.get_patched_ops())
+# Manual warmup (if needed before training loop)
+bastile.warmup_all_kernels()
 
 # Reset all patches
 bastile.reset()
+
+# Clear autotuning cache (for re-tuning)
+bastile.clear_autotune_cache()
+
+# Get applied patches
+bastile.get_patched_ops()
 ```
 
-## Supported Operations
+## Autotuning
 
-| Operation | Forward | Backward | Notes |
-|-----------|---------|----------|-------|
-| RMSNorm | CuTile | CuTile | Full CuTile implementation |
-| SwiGLU MLP | CuTile | CuTile | Custom backward kernel |
-| RoPE | PyTorch | Autograd | HuggingFace compatible |
+Bastile includes automatic kernel autotuning:
 
-## Supported Models
+1. **First run**: Kernels are JIT-compiled and optimal configurations are cached
+2. **Subsequent runs**: Cached configurations are used for faster execution
+3. **Warmup**: Call `bastile.warmup_all_kernels()` to pre-compile kernels before training
 
-- **Qwen3** (RMSNorm, SwiGLU, RoPE) - Dense models
-- **GPT-OSS 20B** (RMSNorm, Fused GEGLU MoE Experts) - OpenAI's open-weight MoE model
-  - Custom CuTile kernel for GPT-OSS's GEGLU activation: `gate * sigmoid(gate * 1.702)`
-  - **11.8% speedup** over PyTorch native implementation
-
-## API Reference
-
-### `bastile.apply(**kwargs) -> List[str]`
-
-Apply kernel patches. Returns list of applied patch names.
-
-```python
-applied = bastile.apply(rms_norm=True, swiglu=True, rope=True)
-# Returns: ['rms_norm_qwen3', 'swiglu_qwen3', 'rope_qwen3']
-```
-
-### `bastile.reset(names=None) -> List[str]`
-
-Reset patches to original implementations.
-
-```python
-bastile.reset()  # Reset all
-bastile.reset(['rms_norm_qwen3'])  # Reset specific patches
-```
-
-### `bastile.get_patched_ops() -> List[str]`
-
-Get list of currently patched operations.
-
-## Using Individual Kernels
-
-```python
-from bastile.ops.rms_norm import BastileRMSNorm
-from bastile.ops.swiglu import swiglu, BastileSwiGLUMLP
-
-# RMSNorm with gradient support
-norm = BastileRMSNorm(hidden_size=4096).cuda()
-x = torch.randn(2, 128, 4096, device="cuda", requires_grad=True)
-y = norm(x)
-y.sum().backward()  # Gradients work!
-
-# SwiGLU with gradient support
-a = torch.randn(2, 128, 2048, device="cuda", requires_grad=True)
-b = torch.randn(2, 128, 2048, device="cuda", requires_grad=True)
-c = swiglu(a, b)  # silu(a) * b
-c.sum().backward()  # da and db computed
-```
-
-## Testing
+## Benchmarks
 
 ```bash
-cd /workspace/bastile
-.venv/bin/python tests/test_qwen3_finetune.py
+# GPT-OSS benchmark (16% speedup)
+uv run python -m tests.benchmarks.benchmark_gpt_oss
+
+# Qwen3 comparison (HF vs Liger vs Bastile)
+uv run python -m tests.benchmarks.benchmark_qwen3_comparison
+
+# Run ops unit tests
+uv run python -m tests.ops.run_all
 ```
 
-## Requirements
+## Why GPT-OSS?
 
-- Python 3.12+
-- PyTorch nightly (2.8.0+ with CUDA 12.8/13.0)
-- cuda-tile >= 1.1.0
-- transformers >= 4.40.0
+GPT-OSS uses a **custom GEGLU activation** not found in standard libraries:
 
-## Architecture
-
+```python
+# Standard SwiGLU: silu(gate) * up
+# GPT-OSS GEGLU: (up + 1) * gate * sigmoid(gate * 1.702)
 ```
-bastile/
-├── src/bastile/
-│   ├── __init__.py      # Main API (apply, reset, etc.)
-│   ├── core.py          # Patching logic
-│   ├── registry.py      # Patch registry
-│   └── ops/
-│       ├── rms_norm.py  # CuTile RMSNorm (forward + backward)
-│       ├── swiglu.py    # CuTile SwiGLU (forward + backward)
-│       └── rope.py      # RoPE with autograd
-└── tests/
-    └── test_qwen3_finetune.py
-```
+
+Bastile provides a fused CuTile kernel for this activation, giving significant speedup.
+
+## Comparison with Liger Kernel
+
+| Feature | Bastile | Liger Kernel |
+|---------|---------|--------------|
+| Backend | CuTile | Triton |
+| Qwen3 speedup | ~0% | +20% |
+| GPT-OSS speedup | +16% | N/A |
+
+For maximum Qwen3 performance, use Liger Kernel. For GPT-OSS with custom activations, use Bastile.
 
 ## License
 

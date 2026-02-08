@@ -1,31 +1,31 @@
 """
-Run all E2E benchmarks.
+Run all benchmarks.
+
+Usage:
+    python -m tests.benchmarks.run_all [--kernel] [--e2e]
+    
+Options:
+    --kernel  Run only kernel benchmarks
+    --e2e     Run only e2e benchmarks
+    (no args) Run all benchmarks
 """
 
 import sys
 
 
-def run_all():
-    print("=" * 70)
-    print("Bastile E2E Benchmarks")
-    print("=" * 70)
-    print()
-    print("Available benchmarks:")
-    print("  1. benchmark_e2e.py    - Compare Qwen3 and GPT-OSS (30s each)")
-    print("  2. benchmark_qwen3.py  - Detailed Qwen3 benchmark (60s)")
-    print("  3. benchmark_gpt_oss.py - Detailed GPT-OSS benchmark (60s)")
-    print()
-    print("Run individually with:")
-    print("  python -m tests.benchmarks.benchmark_e2e")
-    print("  python -m tests.benchmarks.benchmark_qwen3")
-    print("  python -m tests.benchmarks.benchmark_gpt_oss")
-    print()
+def main():
+    args = sys.argv[1:]
     
-    if len(sys.argv) > 1 and sys.argv[1] == "--run":
-        print("Running E2E benchmark...")
-        from . import benchmark_e2e
-        benchmark_e2e.main()
+    if "--kernel" in args:
+        from . import kernel
+        kernel.run_all()
+    elif "--e2e" in args:
+        from . import e2e
+        e2e.run_all()
+    else:
+        from . import run_all
+        run_all()
 
 
 if __name__ == "__main__":
-    run_all()
+    main()

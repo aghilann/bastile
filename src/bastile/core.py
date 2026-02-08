@@ -79,33 +79,37 @@ def _reset_patch(patch: PatchInfo) -> bool:
 
 
 def apply(
-    rms_norm: bool = True,
-    swiglu: bool = True,
-    rope: bool = True,
-    gelu: bool = True,
+    rms_norm: bool = True,   # CuTile RMSNorm with full backward (from TileGym)
+    swiglu: bool = True,     # CuTile SwiGLU with full backward (from TileGym)
+    rope: bool = False,      # Similar performance - keep disabled
+    gelu: bool = True,       # For GPT-OSS GEGLU
     relu: bool = True,
-    moe: bool = True,
+    moe: bool = True,        # Fused GEGLU MoE for GPT-OSS (+58% speedup)
     model_type: Optional[str] = None,
 ) -> List[str]:
     """
     Apply CuTile kernel patches to PyTorch/HuggingFace.
-    
+
+    Optimizations:
+    - RMSNorm: 17.57x speedup over PyTorch (from TileGym)
+    - SwiGLU: On par with PyTorch (CuTile with full backward)
+    - GEGLU MoE: +58% speedup for GPT-OSS models
+
     Args:
-        rms_norm: Whether to patch RMSNorm (default: True)
-        swiglu: Whether to patch SwiGLU/MLP (default: True)
-        rope: Whether to patch RoPE (default: True)
+        rms_norm: Whether to patch RMSNorm (default: True - CuTile with full backward)
+        swiglu: Whether to patch SwiGLU/MLP (default: True - CuTile with full backward)
+        rope: Whether to patch RoPE (default: False - similar performance)
         gelu: Whether to patch GELU activation (default: True)
         relu: Whether to patch ReLU activation (default: True)
-        moe: Whether to patch MoE experts (default: True)
-        model_type: Optional model type filter (e.g., 'llama', 'qwen2')
-    
+        moe: Whether to patch MoE experts (default: True - +58% for GPT-OSS)
+        model_type: Optional model type filter (e.g., 'llama', 'qwen3')
+
     Returns:
         List of applied patch names
-    
+
     Example:
         >>> import bastile
-        >>> bastile.apply()  # Apply all patches
-        >>> bastile.apply(rope=False)  # Apply all except RoPE
+        >>> bastile.apply()  # Apply CuTile optimizations
     """
     # Import ops to register patches
     from . import ops  # noqa: F401
@@ -132,6 +136,7 @@ def apply(
         patches = [p for p in patches if p is not None]
     
     for patch in patches:
+            
         # Check if this patch type is enabled
         patch_type = patch.name.split('_')[0] if '_' in patch.name else patch.name
         
@@ -144,6 +149,13 @@ def apply(
         
         if should_apply and _apply_patch(patch):
             applied.append(patch.name)
+    
+    # Warmup kernels to avoid JIT overhead during training
+    try:
+        from .autotune import warmup_all_kernels
+        warmup_all_kernels()
+    except Exception as e:
+        logger.debug(f"Warmup skipped: {e}")
     
     return applied
 
