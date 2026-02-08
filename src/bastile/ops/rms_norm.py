@@ -1,11 +1,12 @@
 """
-CuTile RMSNorm - ported from TileGym with full backward support and autotuning.
+CuTile RMSNorm - optimized for NVIDIA B200 with full backward support.
 
 Key optimizations:
-1. Two forward variants: gather-based and static persistent
-2. Full backward kernel with gradient computation for dx and dw
-3. Autotuning to select best mode and tile sizes
-4. Float32 for numerical stability
+1. gather/scatter memory access (faster than ct.load/ct.store for row-wise ops)
+2. Single-tile processing (no loops when TILE_SIZE >= N)
+3. flush_to_zero=True for fast computation
+4. Single pass over data (reads x once for both RMS and normalization)
+5. Full backward pass with gradient computation for dx and dw
 """
 
 import torch
@@ -13,9 +14,7 @@ import torch.nn as nn
 from typing import Optional, Tuple
 
 from ..registry import register_patch
-from ..autotune import autotune
 from .utils import next_power_of_2
-from .configs import RMSNormConfig
 
 import cuda.tile as ct
 
@@ -23,27 +22,50 @@ ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
 
 
-def rms_norm_search_space(M: int, N: int, num_sms: int):
-    """Generate search space for RMSNorm autotuning."""
-    TILE_SIZE_N = next_power_of_2(N)
-    
-    # Gather mode configs (one block per row)
-    for tile_n in [256, 512, 1024, 2048, 4096]:
-        if tile_n >= N:
-            yield RMSNormConfig(
-                use_static_persistent=False,
-                tile_size_m=1,
-                tile_size_n=min(tile_n, TILE_SIZE_N),
-            )
-    
-    # Static persistent mode configs (for larger batches)
-    for tile_m in [2, 4, 8, 16]:
-        yield RMSNormConfig(
-            use_static_persistent=True,
-            tile_size_m=tile_m,
-            tile_size_n=TILE_SIZE_N,
-        )
+# ============================================================================
+# Forward kernel
+# ============================================================================
 
+@ct.kernel
+def rms_norm_forward_kernel(
+    x, w, out, rstd,
+    N: ConstInt,
+    eps: ConstFloat,
+    TILE_SIZE: ConstInt,
+):
+    """RMSNorm forward using gather/scatter with fast math.
+
+    Each block processes one row. Reads x and weight once,
+    computes inverse RMS, normalizes, and writes output.
+    """
+    bid = ct.bid(0)
+    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+
+    # Single gather for row and weight
+    x_tile = ct.gather(x, (bid, offsets), check_bounds=True, padding_value=0.0)
+    w_tile = ct.gather(w, offsets, check_bounds=True, padding_value=1.0)
+
+    # Cast to float32 for numerical stability
+    x_f32 = ct.astype(x_tile, ct.float32)
+    w_f32 = ct.astype(w_tile, ct.float32)
+
+    # Compute inverse RMS with fast math
+    x_sq = ct.mul(x_f32, x_f32, flush_to_zero=True)
+    inv_rms = ct.rsqrt(ct.sum(x_sq, axis=0, keepdims=False) / N + eps)
+
+    # Store rstd for backward pass
+    ct.scatter(rstd, bid, inv_rms, check_bounds=True)
+
+    # Normalize: y = x * rstd * weight
+    y = ct.mul(ct.mul(x_f32, inv_rms, flush_to_zero=True), w_f32, flush_to_zero=True)
+    y = ct.astype(y, x.dtype)
+
+    ct.scatter(out, (bid, offsets), y, check_bounds=True)
+
+
+# ============================================================================
+# Backward kernel
+# ============================================================================
 
 @ct.kernel(occupancy=2)
 def rms_norm_backward_kernel(
@@ -95,105 +117,29 @@ def rms_norm_backward_kernel(
     ct.store(dx, index=(row_idx, 0), tile=input_gradient_row)
 
 
-@ct.kernel
-def rms_norm_kernel_gather(
-    x,       # [M, N] input tensor
-    w,       # [N] weight tensor
-    out,     # [M, N] output tensor
-    rstd,    # [M] reciprocal std output
-    N: ConstInt,
-    eps: ConstFloat,
-    TILE_SIZE: ConstInt,
+# ============================================================================
+# Launch functions
+# ============================================================================
+
+def _rms_norm_forward(
+    x_flat: torch.Tensor,
+    weight: torch.Tensor,
+    y: torch.Tensor,
+    rstd: torch.Tensor,
+    N: int,
+    eps: float,
 ):
-    """
-    RMSNorm forward kernel using gather/scatter (for smaller batches).
-    One block per row, processes columns in tiles.
-    """
-    row = ct.bid(0)
-    _rms = ct.full((TILE_SIZE,), 0.0, dtype=ct.float32)
-    num_tiles = (N + TILE_SIZE - 1) // TILE_SIZE
-    offsets = ct.arange(TILE_SIZE, dtype=ct.int32)
+    """Launch optimized gather-based RMSNorm forward kernel."""
+    M = x_flat.shape[0]
+    TILE_SIZE = next_power_of_2(N)
+    grid = (M,)
 
-    for j in range(num_tiles):
-        offs = j * TILE_SIZE + offsets
-        xj = ct.gather(x, (row, offs), check_bounds=True, padding_value=0.0, latency=1)
-        xj = ct.astype(xj, ct.float32)
-        _rms = _rms + xj * xj
-
-    rms = ct.rsqrt(ct.sum(_rms, axis=0, keepdims=False) / N + eps)
-    ct.scatter(rstd, row, rms, check_bounds=True)
-
-    for j in range(num_tiles):
-        offs = j * TILE_SIZE + offsets
-        wj = ct.gather(w, offs, check_bounds=True, padding_value=1.0, latency=1)
-        wj = ct.astype(wj, ct.float32)
-        xj = ct.gather(x, (row, offs), check_bounds=True, padding_value=0.0, latency=1)
-        xj = ct.astype(xj, ct.float32)
-        yj = xj * rms * wj
-        yj = ct.astype(yj, x.dtype)
-        ct.scatter(out, (row, offs), yj, check_bounds=True, latency=1)
-
-
-@ct.kernel
-def rms_norm_kernel_static_persistent(
-    X,          # [M, N] input tensor
-    Y,          # [M, N] output tensor
-    W,          # [N] weight tensor
-    Rstd,       # [M] reciprocal std output
-    TILE_SIZE_M: ConstInt,
-    TILE_SIZE_N: ConstInt,
-    N: ConstInt,
-    eps: ConstFloat,
-):
-    """
-    Static persistent RMSNorm kernel for larger batches.
-    Each block processes multiple rows for better efficiency.
-    """
-    bid = ct.bid(0)
-    M = X.shape[0]
-    upper_bound = (M + TILE_SIZE_M - 1) // TILE_SIZE_M
-
-    w = ct.load(W, index=(0,), shape=(TILE_SIZE_N,), padding_mode=ct.PaddingMode.ZERO)
-    w = ct.astype(w, ct.float32)
-
-    num_tile_blocks = ct.num_blocks(0)
-    for current_bid in range(bid, upper_bound, num_tile_blocks):
-        x = ct.load(
-            X,
-            index=(current_bid, 0),
-            shape=(TILE_SIZE_M, TILE_SIZE_N),
-            latency=10,
-            padding_mode=ct.PaddingMode.ZERO,
-        )
-        x = ct.astype(x, ct.float32)
-
-        x_squared = x * x
-        x2_sum = ct.sum(x_squared, axis=1, keepdims=True)
-
-        N_f32 = ct.full((TILE_SIZE_M, 1), float(N), dtype=ct.float32)
-        variance = x2_sum / N_f32
-
-        eps_tensor = ct.full((TILE_SIZE_M, 1), eps, dtype=ct.float32)
-        variance_eps = variance + eps_tensor
-        rsqrt_var = ct.rsqrt(variance_eps)
-
-        rstd_flat = ct.reshape(rsqrt_var, (TILE_SIZE_M,))
-        row_offsets = ct.arange(TILE_SIZE_M, dtype=ct.int32) + current_bid * TILE_SIZE_M
-        ct.scatter(Rstd, row_offsets, rstd_flat, check_bounds=True)
-
-        x_normalized = x * rsqrt_var
-
-        w_broadcasted = ct.reshape(w, (1, TILE_SIZE_N))
-        y = x_normalized * w_broadcasted
-
-        y = ct.astype(y, X.dtype)
-        ct.store(
-            Y,
-            index=(current_bid, 0),
-            tile=y,
-            allow_tma=False,
-            latency=3,
-        )
+    ct.launch(
+        torch.cuda.current_stream(),
+        grid,
+        rms_norm_forward_kernel,
+        (x_flat, weight, y, rstd, N, eps, TILE_SIZE),
+    )
 
 
 def rms_norm_backward(
@@ -232,41 +178,12 @@ def rms_norm_backward(
     return dx.view(*x_shape), dw
 
 
-def _run_rms_norm_with_config(
-    x_flat: torch.Tensor,
-    weight: torch.Tensor,
-    y: torch.Tensor,
-    rstd: torch.Tensor,
-    N: int,
-    eps: float,
-    config: RMSNormConfig,
-    num_sms: int,
-):
-    """Run RMSNorm with a specific config."""
-    M = x_flat.shape[0]
-    
-    if config.use_static_persistent:
-        grid_size = min(num_sms, ((M + config.tile_size_m - 1) // config.tile_size_m))
-        grid = (grid_size,)
-        
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            rms_norm_kernel_static_persistent,
-            (x_flat, y, weight, rstd, config.tile_size_m, config.tile_size_n, N, eps),
-        )
-    else:
-        grid = (M,)
-        ct.launch(
-            torch.cuda.current_stream(),
-            grid,
-            rms_norm_kernel_gather,
-            (x_flat, weight, y, rstd, N, eps, config.tile_size_n),
-        )
-
+# ============================================================================
+# Autograd wrapper
+# ============================================================================
 
 class RMSNormFunction(torch.autograd.Function):
-    """CuTile RMSNorm with full backward support and autotuning."""
+    """CuTile RMSNorm with full backward support."""
 
     @staticmethod
     def forward(
@@ -276,9 +193,6 @@ class RMSNormFunction(torch.autograd.Function):
         eps: float = 1e-6,
         use_static_persistent: Optional[bool] = None,
     ) -> torch.Tensor:
-        """
-        RMSNorm forward pass with autotuning.
-        """
         x = x.contiguous()
         weight = weight.contiguous()
 
@@ -289,40 +203,7 @@ class RMSNormFunction(torch.autograd.Function):
         y = torch.empty_like(x_flat)
         rstd = torch.empty(M, dtype=torch.float32, device=x.device)
 
-        NUM_SMS = torch.cuda.get_device_properties(x.device).multi_processor_count
-
-        # If mode is forced, use it directly
-        if use_static_persistent is not None:
-            TILE_SIZE_N = next_power_of_2(N)
-            if use_static_persistent:
-                if TILE_SIZE_N <= 1024:
-                    TILE_SIZE_M = 16
-                elif TILE_SIZE_N >= 16384:
-                    TILE_SIZE_M = 2
-                else:
-                    TILE_SIZE_M = 4
-                config = RMSNormConfig(True, TILE_SIZE_M, TILE_SIZE_N)
-            else:
-                MAX_FUSED_SIZE = 4096 // x.element_size()
-                TILE_SIZE = min(MAX_FUSED_SIZE, TILE_SIZE_N)
-                config = RMSNormConfig(False, 1, TILE_SIZE)
-        else:
-            # Autotune
-            key = (M, N, str(x.dtype))
-            
-            def run_with_config(cfg):
-                _run_rms_norm_with_config(x_flat, weight, y, rstd, N, eps, cfg, NUM_SMS)
-            
-            config = autotune(
-                kernel_name="rms_norm",
-                run_fn=run_with_config,
-                search_space=list(rms_norm_search_space(M, N, NUM_SMS)),
-                key=str(key),
-                max_iter=8,
-            )
-
-        # Run with selected config
-        _run_rms_norm_with_config(x_flat, weight, y, rstd, N, eps, config, NUM_SMS)
+        _rms_norm_forward(x_flat, weight, y, rstd, N, eps)
 
         ctx.save_for_backward(x, weight, rstd)
         ctx.eps = eps
@@ -343,14 +224,16 @@ def rms_norm(
     eps: float = 1e-6,
     use_static_persistent: Optional[bool] = None,
 ) -> torch.Tensor:
-    """
-    Apply CuTile RMSNorm with autotuning.
-    """
+    """Apply CuTile RMSNorm."""
     return RMSNormFunction.apply(x, weight, eps, use_static_persistent)
 
 
+# ============================================================================
+# Module
+# ============================================================================
+
 class CuTileRMSNorm(nn.Module):
-    """Drop-in replacement for Qwen3RMSNorm using CuTile kernels with autotuning."""
+    """Drop-in replacement for Qwen3RMSNorm using CuTile kernels."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
@@ -369,7 +252,7 @@ class CuTileRMSNorm(nn.Module):
 # Register patches
 register_patch(
     name="rms_norm_qwen3",
-    description="CuTile RMSNorm with autotuning for Qwen3",
+    description="CuTile RMSNorm for Qwen3",
     target_module="transformers.models.qwen3.modeling_qwen3",
     target_attr="Qwen3RMSNorm",
     replacement=CuTileRMSNorm,
@@ -380,7 +263,7 @@ register_patch(
 
 register_patch(
     name="rms_norm_gpt_oss",
-    description="CuTile RMSNorm with autotuning for GPT-OSS",
+    description="CuTile RMSNorm for GPT-OSS",
     target_module="transformers.models.gpt_oss.modeling_gpt_oss",
     target_attr="GptOssRMSNorm",
     replacement=CuTileRMSNorm,

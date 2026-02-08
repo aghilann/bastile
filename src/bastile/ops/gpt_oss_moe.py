@@ -1,5 +1,5 @@
 """
-CuTile kernels for GPT-OSS MoE (Mixture of Experts) with autotuning.
+CuTile kernels for GPT-OSS MoE (Mixture of Experts) - optimized for NVIDIA B200.
 
 GPT-OSS uses a custom GEGLU activation:
   gate = gate.clamp(max=limit)
@@ -7,10 +7,12 @@ GPT-OSS uses a custom GEGLU activation:
   glu = gate * sigmoid(gate * alpha)
   output = (up + 1) * glu
 
-This module provides:
-1. Fused GEGLU activation kernel with autotuning (including occupancy)
-2. Fused expert forward (gate_up projection + GEGLU + down projection)
-3. Backward passes for training
+Key optimizations:
+1. gather/scatter memory access with fast math
+2. flush_to_zero=True for fast sigmoid computation
+3. Approximate rounding for division (fast reciprocal)
+4. One block per row with inner column loop for cache-friendly strided access
+5. Full backward pass with recomputation (no extra memory)
 """
 
 import torch
@@ -18,10 +20,10 @@ import torch.nn as nn
 from typing import Optional
 
 from ..registry import register_patch
-from ..autotune import autotune, default_key
-from .configs import GEGLUConfig
+from .utils import next_power_of_2
 
 import cuda.tile as ct
+from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 # Constants from GPT-OSS
 ALPHA = 1.702
@@ -31,348 +33,209 @@ ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
 
 
-def geglu_search_space():
-    """Generate search space for GEGLU autotuning with occupancy."""
-    for block_size in [64, 128, 256, 512, 1024]:
-        for occupancy in [1, 2, 4, 8]:
-            yield GEGLUConfig(block_size=block_size, occupancy=occupancy, use_float32=True)
+# ============================================================================
+# Forward kernel
+# ============================================================================
+
+@ct.kernel
+def geglu_forward_kernel(
+    gate_up, output,
+    expert_dim: ConstInt,
+    alpha: ConstFloat, limit: ConstFloat,
+    BLOCK_SIZE: ConstInt,
+):
+    """GEGLU forward: (up + 1) * gate * sigmoid(gate * alpha) with fast math.
+
+    One block per row with inner column loop. Uses 2D gather/scatter
+    for bounds safety with stride-2 access for interleaved gate/up.
+    """
+    bid = ct.bid(0)
+
+    for col_start in range(0, expert_dim, BLOCK_SIZE):
+        offsets = col_start + ct.arange(BLOCK_SIZE, dtype=ct.int32)
+
+        # 2D gather with stride-2 for interleaved layout
+        gate_cols = offsets * 2
+        up_cols = offsets * 2 + 1
+
+        gate = ct.gather(gate_up, (bid, gate_cols), check_bounds=True, padding_value=0.0)
+        up = ct.gather(gate_up, (bid, up_cols), check_bounds=True, padding_value=0.0)
+
+        gate = ct.astype(gate, ct.float32)
+        up = ct.astype(up, ct.float32)
+
+        # Clamp
+        gate = ct.minimum(gate, limit)
+        up = ct.maximum(ct.minimum(up, limit), -limit)
+
+        # Sigmoid(gate * alpha) with fast math
+        denom = ct.add(1.0, ct.exp(-(gate * alpha)), flush_to_zero=True)
+        sigmoid_val = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
+
+        # glu = gate * sigmoid(gate * alpha)
+        glu = ct.mul(gate, sigmoid_val, flush_to_zero=True)
+
+        # output = (up + 1) * glu
+        result = ct.mul(up + 1.0, glu, flush_to_zero=True)
+        result = ct.astype(result, output.dtype)
+
+        # 2D scatter (bounds-safe)
+        ct.scatter(output, (bid, offsets), result, check_bounds=True)
 
 
 # ============================================================================
-# Forward kernel variants with different occupancy levels
+# Backward kernel
 # ============================================================================
 
-def _geglu_forward_impl(gate_up_ptr, output_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE):
-    """Shared GEGLU forward implementation."""
-    pid = ct.bid(0)
-    num_programs = ct.num_blocks(0)
-    
-    for row_idx in range(pid, num_tokens, num_programs):
-        for col_start in range(0, expert_dim, BLOCK_SIZE):
-            col_offsets = col_start + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-            
-            gate_indices = row_idx * (2 * expert_dim) + col_offsets * 2
-            up_indices = gate_indices + 1
-            
-            gate = ct.gather(gate_up_ptr, gate_indices, check_bounds=True, padding_value=0.0)
-            up = ct.gather(gate_up_ptr, up_indices, check_bounds=True, padding_value=0.0)
-            
-            gate = ct.astype(gate, ct.float32)
-            up = ct.astype(up, ct.float32)
-            
-            gate = ct.minimum(gate, limit)
-            up = ct.maximum(ct.minimum(up, limit), -limit)
-            
-            sigmoid_input = ct.mul(gate, ct.full((BLOCK_SIZE,), alpha, dtype=ct.float32))
-            neg_sigmoid_input = ct.sub(ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32), sigmoid_input)
-            exp_neg = ct.exp(neg_sigmoid_input)
-            one = ct.full((BLOCK_SIZE,), 1.0, dtype=ct.float32)
-            sigmoid_val = ct.truediv(one, ct.add(one, exp_neg))
-            
-            glu = ct.mul(gate, sigmoid_val)
-            up_plus_one = ct.add(up, one)
-            result = ct.mul(up_plus_one, glu)
-            
-            result = ct.astype(result, output_ptr.dtype)
-            
-            out_indices = row_idx * expert_dim + col_offsets
-            ct.scatter(output_ptr, out_indices, result, check_bounds=True)
-
-
-@ct.kernel(occupancy=1)
-def geglu_forward_kernel_occ1(
-    gate_up_ptr, output_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
+@ct.kernel
+def geglu_backward_kernel(
+    grad_output, gate_up, grad_gate_up,
+    expert_dim: ConstInt,
+    alpha: ConstFloat, limit: ConstFloat,
+    BLOCK_SIZE: ConstInt,
 ):
-    """GEGLU forward with occupancy=1."""
-    _geglu_forward_impl(gate_up_ptr, output_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
+    """GEGLU backward with gather/scatter and fast math.
 
+    d(output)/d(gate) = (up + 1) * sigmoid(g*a) * (1 + g*a*(1-sigmoid(g*a)))
+    d(output)/d(up) = glu
+    """
+    bid = ct.bid(0)
 
-@ct.kernel(occupancy=2)
-def geglu_forward_kernel_occ2(
-    gate_up_ptr, output_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU forward with occupancy=2."""
-    _geglu_forward_impl(gate_up_ptr, output_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
+    for col_start in range(0, expert_dim, BLOCK_SIZE):
+        offsets = col_start + ct.arange(BLOCK_SIZE, dtype=ct.int32)
 
+        # Gather grad_output
+        grad_out = ct.gather(grad_output, (bid, offsets), check_bounds=True, padding_value=0.0)
+        grad_out = ct.astype(grad_out, ct.float32)
 
-@ct.kernel(occupancy=4)
-def geglu_forward_kernel_occ4(
-    gate_up_ptr, output_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU forward with occupancy=4."""
-    _geglu_forward_impl(gate_up_ptr, output_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
+        # Gather gate/up from interleaved layout
+        gate_cols = offsets * 2
+        up_cols = offsets * 2 + 1
+        gate_orig = ct.gather(gate_up, (bid, gate_cols), check_bounds=True, padding_value=0.0)
+        up_orig = ct.gather(gate_up, (bid, up_cols), check_bounds=True, padding_value=0.0)
+        gate_orig = ct.astype(gate_orig, ct.float32)
+        up_orig = ct.astype(up_orig, ct.float32)
 
+        # Recompute clamped values
+        gate = ct.minimum(gate_orig, limit)
+        up = ct.maximum(ct.minimum(up_orig, limit), -limit)
 
-@ct.kernel(occupancy=8)
-def geglu_forward_kernel_occ8(
-    gate_up_ptr, output_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU forward with occupancy=8."""
-    _geglu_forward_impl(gate_up_ptr, output_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
+        # Recompute sigmoid with fast math
+        denom = ct.add(1.0, ct.exp(-(gate * alpha)), flush_to_zero=True)
+        sigmoid_val = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
 
+        glu = ct.mul(gate, sigmoid_val, flush_to_zero=True)
 
-GEGLU_FORWARD_KERNELS = {
-    1: geglu_forward_kernel_occ1,
-    2: geglu_forward_kernel_occ2,
-    4: geglu_forward_kernel_occ4,
-    8: geglu_forward_kernel_occ8,
-}
+        # d_up = grad_out * glu
+        d_up = ct.mul(grad_out, glu, flush_to_zero=True)
+
+        # d_glu/d_gate = sigmoid * (1 + g*a*(1-sigmoid))
+        one_minus_sig = 1.0 - sigmoid_val
+        term = (gate * alpha) * one_minus_sig
+        d_glu_d_gate = ct.mul(sigmoid_val, 1.0 + term, flush_to_zero=True)
+        d_gate = ct.mul(ct.mul(grad_out, up + 1.0, flush_to_zero=True), d_glu_d_gate, flush_to_zero=True)
+
+        d_gate = ct.astype(d_gate, grad_gate_up.dtype)
+        d_up = ct.astype(d_up, grad_gate_up.dtype)
+
+        # 2D scatter with stride-2 for interleaved layout
+        ct.scatter(grad_gate_up, (bid, gate_cols), d_gate, check_bounds=True)
+        ct.scatter(grad_gate_up, (bid, up_cols), d_up, check_bounds=True)
 
 
 # ============================================================================
-# Backward kernel variants with different occupancy levels
+# Launch functions
 # ============================================================================
 
-def _geglu_backward_impl(grad_output_ptr, gate_up_ptr, grad_gate_up_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE):
-    """Shared GEGLU backward implementation."""
-    pid = ct.bid(0)
-    num_programs = ct.num_blocks(0)
-    
-    for row_idx in range(pid, num_tokens, num_programs):
-        for col_start in range(0, expert_dim, BLOCK_SIZE):
-            col_offsets = col_start + ct.arange(BLOCK_SIZE, dtype=ct.int32)
-            
-            grad_out_indices = row_idx * expert_dim + col_offsets
-            grad_out = ct.gather(grad_output_ptr, grad_out_indices, check_bounds=True, padding_value=0.0)
-            grad_out = ct.astype(grad_out, ct.float32)
-            
-            gate_indices = row_idx * (2 * expert_dim) + col_offsets * 2
-            up_indices = gate_indices + 1
-            
-            gate_orig = ct.gather(gate_up_ptr, gate_indices, check_bounds=True, padding_value=0.0)
-            up_orig = ct.gather(gate_up_ptr, up_indices, check_bounds=True, padding_value=0.0)
-            gate_orig = ct.astype(gate_orig, ct.float32)
-            up_orig = ct.astype(up_orig, ct.float32)
-            
-            gate = ct.minimum(gate_orig, limit)
-            up = ct.maximum(ct.minimum(up_orig, limit), -limit)
-            
-            alpha_tensor = ct.full((BLOCK_SIZE,), alpha, dtype=ct.float32)
-            sigmoid_input = ct.mul(gate, alpha_tensor)
-            zero = ct.full((BLOCK_SIZE,), 0.0, dtype=ct.float32)
-            neg_sigmoid_input = ct.sub(zero, sigmoid_input)
-            exp_neg = ct.exp(neg_sigmoid_input)
-            one = ct.full((BLOCK_SIZE,), 1.0, dtype=ct.float32)
-            sigmoid_val = ct.truediv(one, ct.add(one, exp_neg))
-            
-            glu = ct.mul(gate, sigmoid_val)
-            
-            d_up = ct.mul(grad_out, glu)
-            
-            one_minus_sig = ct.sub(one, sigmoid_val)
-            term = ct.mul(ct.mul(gate, alpha_tensor), one_minus_sig)
-            d_glu_d_gate = ct.mul(sigmoid_val, ct.add(one, term))
-            up_plus_one = ct.add(up, one)
-            d_gate = ct.mul(ct.mul(grad_out, up_plus_one), d_glu_d_gate)
-            
-            d_gate = ct.astype(d_gate, grad_gate_up_ptr.dtype)
-            d_up = ct.astype(d_up, grad_gate_up_ptr.dtype)
-            
-            ct.scatter(grad_gate_up_ptr, gate_indices, d_gate, check_bounds=True)
-            ct.scatter(grad_gate_up_ptr, up_indices, d_up, check_bounds=True)
-
-
-@ct.kernel(occupancy=1)
-def geglu_backward_kernel_occ1(
-    grad_output_ptr, gate_up_ptr, grad_gate_up_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU backward with occupancy=1."""
-    _geglu_backward_impl(grad_output_ptr, gate_up_ptr, grad_gate_up_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
-
-
-@ct.kernel(occupancy=2)
-def geglu_backward_kernel_occ2(
-    grad_output_ptr, gate_up_ptr, grad_gate_up_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU backward with occupancy=2."""
-    _geglu_backward_impl(grad_output_ptr, gate_up_ptr, grad_gate_up_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
-
-
-@ct.kernel(occupancy=4)
-def geglu_backward_kernel_occ4(
-    grad_output_ptr, gate_up_ptr, grad_gate_up_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU backward with occupancy=4."""
-    _geglu_backward_impl(grad_output_ptr, gate_up_ptr, grad_gate_up_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
-
-
-@ct.kernel(occupancy=8)
-def geglu_backward_kernel_occ8(
-    grad_output_ptr, gate_up_ptr, grad_gate_up_ptr,
-    num_tokens: ConstInt, expert_dim: ConstInt,
-    alpha: ConstFloat, limit: ConstFloat, BLOCK_SIZE: ConstInt,
-):
-    """GEGLU backward with occupancy=8."""
-    _geglu_backward_impl(grad_output_ptr, gate_up_ptr, grad_gate_up_ptr, num_tokens, expert_dim, alpha, limit, BLOCK_SIZE)
-
-
-GEGLU_BACKWARD_KERNELS = {
-    1: geglu_backward_kernel_occ1,
-    2: geglu_backward_kernel_occ2,
-    4: geglu_backward_kernel_occ4,
-    8: geglu_backward_kernel_occ8,
-}
-
-
-# ============================================================================
-# Kernel launch functions
-# ============================================================================
-
-def geglu_forward_cutile(
-    gate_up: torch.Tensor,
-    config: GEGLUConfig,
-) -> torch.Tensor:
-    """Launch CuTile GEGLU forward kernel."""
+def geglu_forward_cutile(gate_up: torch.Tensor) -> torch.Tensor:
+    """CuTile-accelerated GEGLU forward."""
     num_tokens = gate_up.shape[0]
     expert_dim = gate_up.shape[1] // 2
-    
+
     output = torch.empty(
         (num_tokens, expert_dim),
         dtype=gate_up.dtype,
         device=gate_up.device,
     )
-    
+
     if num_tokens > 0:
-        gate_up_flat = gate_up.reshape(-1)
-        output_flat = output.reshape(-1)
-        
-        NUM_SM = torch.cuda.get_device_properties(gate_up.device).multi_processor_count
-        num_programs = min(NUM_SM * config.occupancy, num_tokens)
-        grid = (num_programs,)
-        
-        kernel = GEGLU_FORWARD_KERNELS[config.occupancy]
-        
+        # Use smaller block size for cache-friendly strided access
+        BLOCK_SIZE = min(next_power_of_2(expert_dim), 256)
+        grid = (num_tokens,)
+
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            kernel,
-            (
-                gate_up_flat,
-                output_flat,
-                num_tokens,
-                expert_dim,
-                ALPHA,
-                LIMIT,
-                config.block_size,
-            ),
+            geglu_forward_kernel,
+            (gate_up, output, expert_dim, ALPHA, LIMIT, BLOCK_SIZE),
         )
-    
+
     return output
 
 
 def geglu_backward_cutile(
     grad_output: torch.Tensor,
     gate_up: torch.Tensor,
-    config: GEGLUConfig,
 ) -> torch.Tensor:
-    """Launch CuTile GEGLU backward kernel."""
+    """CuTile-accelerated GEGLU backward."""
     num_tokens = gate_up.shape[0]
     expert_dim = gate_up.shape[1] // 2
-    
+
     grad_gate_up = torch.empty_like(gate_up)
-    
+
     if num_tokens > 0:
-        gate_up_flat = gate_up.reshape(-1)
-        grad_output_flat = grad_output.reshape(-1)
-        grad_gate_up_flat = grad_gate_up.reshape(-1)
-        
-        NUM_SM = torch.cuda.get_device_properties(gate_up.device).multi_processor_count
-        num_programs = min(NUM_SM * config.occupancy, num_tokens)
-        grid = (num_programs,)
-        
-        kernel = GEGLU_BACKWARD_KERNELS[config.occupancy]
-        
+        BLOCK_SIZE = min(next_power_of_2(expert_dim), 256)
+        grid = (num_tokens,)
+
         ct.launch(
             torch.cuda.current_stream(),
             grid,
-            kernel,
-            (
-                grad_output_flat,
-                gate_up_flat,
-                grad_gate_up_flat,
-                num_tokens,
-                expert_dim,
-                ALPHA,
-                LIMIT,
-                config.block_size,
-            ),
+            geglu_backward_kernel,
+            (grad_output, gate_up, grad_gate_up, expert_dim, ALPHA, LIMIT, BLOCK_SIZE),
         )
-    
+
     return grad_gate_up
 
 
+# ============================================================================
+# Autograd wrapper
+# ============================================================================
+
 class GEGLUFunction(torch.autograd.Function):
-    """PyTorch autograd wrapper for autotuned CuTile GEGLU."""
-    
-    _cached_config: Optional[GEGLUConfig] = None
-    
+    """CuTile GEGLU with full backward support."""
+
     @staticmethod
     def forward(ctx, gate_up: torch.Tensor) -> torch.Tensor:
-        """Forward pass with autotuning."""
-        num_tokens = gate_up.shape[0]
-        expert_dim = gate_up.shape[1] // 2
-        
-        key = (num_tokens, expert_dim, str(gate_up.dtype))
-        
-        def run_with_config(cfg):
-            geglu_forward_cutile(gate_up, cfg)
-        
-        config = autotune(
-            kernel_name="geglu_forward",
-            run_fn=run_with_config,
-            search_space=geglu_search_space(),
-            key=key,
-            max_iter=20,  # More iterations for occupancy tuning
-            use_heuristic=False,  # Actually benchmark configs on B200
-        )
-        
-        GEGLUFunction._cached_config = config
-        
-        output = geglu_forward_cutile(gate_up, config)
-        
+        output = geglu_forward_cutile(gate_up)
         ctx.save_for_backward(gate_up)
-        ctx.config = config
         return output
-    
+
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         gate_up, = ctx.saved_tensors
-        config = ctx.config
-        
-        grad_gate_up = geglu_backward_cutile(grad_output, gate_up, config)
-        
+        grad_gate_up = geglu_backward_cutile(grad_output, gate_up)
         return grad_gate_up
 
 
 def geglu_activation(gate_up: torch.Tensor) -> torch.Tensor:
-    """Apply autotuned GEGLU activation to interleaved gate/up tensor."""
+    """Apply CuTile GEGLU activation to interleaved gate/up tensor."""
     return GEGLUFunction.apply(gate_up)
 
 
+# ============================================================================
+# MoE Module
+# ============================================================================
+
 class BastileGptOssExperts(nn.Module):
-    """Optimized GPT-OSS Experts module with autotuned CuTile GEGLU activation."""
-    
+    """Optimized GPT-OSS Experts module with CuTile GEGLU activation."""
+
     def __init__(self, config):
         super().__init__()
         self.intermediate_size = config.intermediate_size
         self.num_experts = config.num_local_experts
         self.hidden_size = config.hidden_size
         self.expert_dim = self.intermediate_size
-        
+
         self.gate_up_proj = nn.Parameter(
             torch.empty(self.num_experts, self.hidden_size, 2 * self.expert_dim)
         )
@@ -387,7 +250,7 @@ class BastileGptOssExperts(nn.Module):
         )
         self.alpha = ALPHA
         self.limit = LIMIT
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -398,9 +261,9 @@ class BastileGptOssExperts(nn.Module):
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(-1, self.hidden_size)
         num_experts = routing_weights.shape[1]
-        
+
         next_states = torch.zeros_like(hidden_states)
-        
+
         with torch.no_grad():
             expert_mask = torch.nn.functional.one_hot(
                 router_indices, num_classes=num_experts
@@ -409,40 +272,40 @@ class BastileGptOssExperts(nn.Module):
             expert_hit = torch.greater(
                 expert_mask.sum(dim=(-1, -2)), 0
             ).nonzero()
-        
+
         for expert_idx in expert_hit[:]:
             expert_idx = expert_idx[0]
             with torch.no_grad():
                 _, token_idx = torch.where(expert_mask[expert_idx])
-            
+
             current_state = hidden_states[token_idx]
-            
+
             gate_up = (
                 current_state @ self.gate_up_proj[expert_idx]
                 + self.gate_up_proj_bias[expert_idx]
             )
-            
+
             gated_output = geglu_activation(gate_up)
-            
+
             out = (
                 gated_output @ self.down_proj[expert_idx]
                 + self.down_proj_bias[expert_idx]
             )
-            
+
             weighted_output = out * routing_weights[token_idx, expert_idx, None]
             next_states.index_add_(
                 0, token_idx, weighted_output.to(hidden_states.dtype)
             )
-        
+
         next_states = next_states.view(batch_size, -1, self.hidden_size)
-        
+
         return next_states
 
 
 # Register the patch
 register_patch(
     name="moe_experts_gpt_oss",
-    description="Autotuned CuTile Fused GEGLU MoE Experts for GPT-OSS models",
+    description="CuTile Fused GEGLU MoE Experts for GPT-OSS models",
     target_module="transformers.models.gpt_oss.modeling_gpt_oss",
     target_attr="GptOssExperts",
     replacement=BastileGptOssExperts,
