@@ -140,7 +140,12 @@ def setup_bastile():
     """Apply Bastile patches."""
     import bastile
     bastile.reset()
-    bastile.apply(rms_norm=True, swiglu=True)
+    bastile.apply(
+        rms_norm=True, 
+        swiglu=True, 
+        rope=True,           
+        cross_entropy=True
+    )
 
 
 def main():
