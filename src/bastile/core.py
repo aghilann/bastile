@@ -81,10 +81,7 @@ def _reset_patch(patch: PatchInfo) -> bool:
 def apply(
     rms_norm: bool = True,   # CuTile RMSNorm with full backward (from TileGym)
     swiglu: bool = True,     # CuTile SwiGLU with full backward (from TileGym)
-    rope: bool = False,      # Similar performance - keep disabled
-    gelu: bool = True,       # For GPT-OSS GEGLU
-    relu: bool = True,
-    moe: bool = True,        # Fused GEGLU MoE for GPT-OSS (+58% speedup)
+    rope: bool = True,       # CuTile RoPE with autotuning
     cross_entropy: bool = True,  # Fused cross-entropy loss with in-place gradient
     model_type: Optional[str] = None,
 ) -> List[str]:
@@ -94,16 +91,15 @@ def apply(
     Optimizations:
     - RMSNorm: 17.57x speedup over PyTorch (from TileGym)
     - SwiGLU: On par with PyTorch (CuTile with full backward)
-    - GEGLU MoE: +58% speedup for GPT-OSS models
+    - RoPE: CuTile RoPE with autotuning
+    - Cross-Entropy: Fused cross-entropy loss with in-place gradient
 
     Args:
         rms_norm: Whether to patch RMSNorm (default: True - CuTile with full backward)
         swiglu: Whether to patch SwiGLU/MLP (default: True - CuTile with full backward)
-        rope: Whether to patch RoPE (default: False - similar performance)
-        gelu: Whether to patch GELU activation (default: True)
-        relu: Whether to patch ReLU activation (default: True)
-        moe: Whether to patch MoE experts (default: True - +58% for GPT-OSS)
-        model_type: Optional model type filter (e.g., 'llama', 'qwen3')
+        rope: Whether to patch RoPE (default: True - CuTile with autotuning)
+        cross_entropy: Whether to patch cross-entropy loss (default: True)
+        model_type: Optional model type filter (e.g., 'qwen3')
 
     Returns:
         List of applied patch names
@@ -122,9 +118,6 @@ def apply(
         'rms_norm': rms_norm,
         'swiglu': swiglu,
         'rope': rope,
-        'gelu': gelu,
-        'relu': relu,
-        'moe': moe,
         'cross_entropy': cross_entropy,
     }
     
