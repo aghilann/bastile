@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main, cute]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-build:
+    name: Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check lock file is up to date
+        run: uv lock --check
+
+      - name: Build package
+        run: uv build
+
+      - name: Verify package metadata
+        run: |
+          uv run --no-project python -c "
+          import importlib.metadata, zipfile, glob
+          whl = glob.glob('dist/*.whl')[0]
+          with zipfile.ZipFile(whl) as z:
+              meta = [n for n in z.namelist() if n.endswith('METADATA')][0]
+              print(z.read(meta).decode())
+          "

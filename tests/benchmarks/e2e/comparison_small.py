@@ -10,6 +10,7 @@ Compares training performance across three configurations:
 import torch
 import gc
 import time
+import inspect
 import importlib
 from typing import Optional, Callable, List
 
@@ -36,8 +37,8 @@ def run_benchmark(
     name: str,
     setup_fn: Optional[Callable] = None,
     duration_sec: float = 15.0,
-    batch_size: int = 4,
-    seq_len: int = 256,
+    batch_size: int = 1,
+    seq_len: int = 4096,
 ) -> E2EBenchmarkResult:
     """Run training benchmark."""
     
@@ -46,20 +47,32 @@ def run_benchmark(
     if setup_fn:
         setup_fn()
     
-    from transformers import Qwen3Config, Qwen3ForCausalLM
+    # Import directly from the reloaded module to avoid stale cached references.
+    # (from transformers import Qwen3ForCausalLM returns a cached class
+    #  that doesn't reflect importlib.reload or monkey-patches)
+    from transformers import Qwen3Config
+    import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
+    Qwen3ForCausalLM = qwen3_mod.Qwen3ForCausalLM
     
     config = Qwen3Config(
-        vocab_size=32000,
-        hidden_size=1024,
-        intermediate_size=2816,
-        num_hidden_layers=6,
-        num_attention_heads=16,
-        num_key_value_heads=4,
+        vocab_size=151936,
+        hidden_size=4096,
+        intermediate_size=14336,
+        num_hidden_layers=36,
+        num_attention_heads=32,
+        num_key_value_heads=8,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=32768,
         rms_norm_eps=1e-6,
-        head_dim=64,
+        tie_word_embeddings=False,
+        head_dim=128,
     )
+    
+    # Diagnostic: verify which implementations are active
+    print(f"  RMSNorm: {qwen3_mod.Qwen3RMSNorm.__module__}.{qwen3_mod.Qwen3RMSNorm.__name__}")
+    print(f"  MLP:     {qwen3_mod.Qwen3MLP.__module__}.{qwen3_mod.Qwen3MLP.__name__}")
+    print(f"  RoPE:    {qwen3_mod.apply_rotary_pos_emb.__module__}.{qwen3_mod.apply_rotary_pos_emb.__name__}")
+    print(f"  Forward: {inspect.getfile(Qwen3ForCausalLM.forward)}")
     
     model = Qwen3ForCausalLM(config)
     model = model.cuda().to(torch.bfloat16)
@@ -73,7 +86,7 @@ def run_benchmark(
     tokens_per_iter = batch_size * seq_len
     
     # Warmup
-    warmup_iters = 20 if setup_fn else 5
+    warmup_iters = 10
     for _ in range(warmup_iters):
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -152,7 +165,7 @@ def main():
     print("=" * 75)
     print("Qwen3 Benchmark: HuggingFace vs Liger Kernel vs Bastile")
     print("=" * 75)
-    print("\nConfig: 6 layers, 1024 hidden, batch=4, seq=256, 15 sec each")
+    print("\nConfig: Qwen3-8B (36 layers, 4096 hidden, 32 heads), batch=1, seq=4096, 15 sec each")
     
     print_gpu_info()
     

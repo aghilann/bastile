@@ -2,13 +2,15 @@
 End-to-end benchmarks - full training runs with patched kernels.
 
 Benchmarks:
-- qwen3: Qwen3 finetuning benchmark
-- comparison: Qwen3 HuggingFace vs Liger vs Bastile
-- qwen_06b_direct: Qwen3 0.5B direct benchmark
+- qwen_8b_seqlen: Qwen3-8B seq length sweep (PyTorch vs Liger vs Bastile)
+- qwen_8b_liger: Qwen3-8B seq length sweep (PyTorch vs Liger only)
+- comparison_small: Qwen3-8B HuggingFace vs Liger vs Bastile (single config)
+- profile_kernels: Kernel-level profiling with torch.profiler
 """
 
-from .qwen3 import main as benchmark_qwen3
-from .comparison import main as benchmark_comparison
+from .qwen_8b_seqlen import main as benchmark_qwen3_8b
+from .qwen_8b_liger import main as benchmark_qwen3_8b_liger
+from .comparison_small import main as benchmark_comparison_small
 
 
 def run_all():
@@ -16,17 +18,17 @@ def run_all():
     print("=" * 80)
     print("Running All E2E Benchmarks")
     print("=" * 80)
-    
-    benchmark_qwen3()
-    benchmark_comparison()
-    
+
+    benchmark_qwen3_8b()
+
     print("\n" + "=" * 80)
     print("All E2E benchmarks complete!")
     print("=" * 80)
 
 
 __all__ = [
-    "benchmark_qwen3",
-    "benchmark_comparison",
+    "benchmark_qwen3_8b",
+    "benchmark_qwen3_8b_liger",
+    "benchmark_comparison_small",
     "run_all",
 ]
