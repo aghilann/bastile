@@ -3,12 +3,11 @@ End-to-end benchmarks - full training runs with patched kernels.
 
 Benchmarks:
 - qwen3: Qwen3 finetuning benchmark
-- gpt_oss: GPT-OSS finetuning benchmark
 - comparison: Qwen3 HuggingFace vs Liger vs Bastile
+- qwen_06b_direct: Qwen3 0.5B direct benchmark
 """
 
 from .qwen3 import main as benchmark_qwen3
-from .gpt_oss import main as benchmark_gpt_oss
 from .comparison import main as benchmark_comparison
 
 
@@ -19,7 +18,6 @@ def run_all():
     print("=" * 80)
     
     benchmark_qwen3()
-    benchmark_gpt_oss()
     benchmark_comparison()
     
     print("\n" + "=" * 80)
@@ -29,7 +27,6 @@ def run_all():
 
 __all__ = [
     "benchmark_qwen3",
-    "benchmark_gpt_oss",
     "benchmark_comparison",
     "run_all",
 ]

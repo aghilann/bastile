@@ -83,11 +83,8 @@ def run_benchmark(
     attention_mask = torch.ones_like(input_ids)
     tokens_per_iter = batch_size * seq_len
     
-    # Warmup (more iterations for kernel autotuning)
-    if warmup_iterations is None:
-        warmup_iters = 20 if setup_fn else 5
-    else:
-        warmup_iters = warmup_iterations
+    # Warmup (equal for all configurations)
+    warmup_iters = warmup_iterations if warmup_iterations is not None else 50
     print(f"  Warming up ({warmup_iters} iterations)...")
     for _ in range(warmup_iters):
         optimizer.zero_grad()
@@ -190,13 +187,18 @@ def main():
     
     results: List[E2EBenchmarkResult] = []
     
-    # 1. PyTorch Baseline
-    print_header("Benchmark: PyTorch (Baseline)", 80)
-    pytorch_result = run_benchmark("PyTorch", setup_fn=None)
-    results.append(pytorch_result)
+    # 1. Bastile
+    print_header("Benchmark: Bastile", 80)
+    bastile_result = run_benchmark("Bastile", setup_fn=setup_bastile, warmup_iterations=50)
+    results.append(bastile_result)
+    
+    # Reset Bastile
+    import bastile
+    bastile.reset()
     
     # 2. Liger Kernel
     print_header("Benchmark: Liger Kernel", 80)
+    reset_environment()
     try:
         liger_result = run_benchmark("Liger", setup_fn=setup_liger)
         results.append(liger_result)
@@ -206,15 +208,11 @@ def main():
         traceback.print_exc()
         liger_result = None
     
-    # 3. Bastile
-    print_header("Benchmark: Bastile", 80)
+    # 3. PyTorch Baseline
+    print_header("Benchmark: PyTorch (Baseline)", 80)
     reset_environment()
-    bastile_result = run_benchmark("Bastile", setup_fn=setup_bastile, warmup_iterations=50)
-    results.append(bastile_result)
-    
-    # Reset Bastile
-    import bastile
-    bastile.reset()
+    pytorch_result = run_benchmark("PyTorch", setup_fn=None)
+    results.append(pytorch_result)
     
     # Results table
     print_header("RESULTS", 80)
