@@ -18,6 +18,8 @@ classifiers = [
 ]
 
 dependencies = [
+    "nvidia-cutlass>=4.2.0.0",
+    "nvidia-cutlass-dsl>=4.3.5",
     "transformers>=4.40.0",
 ]
 

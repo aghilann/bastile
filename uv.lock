@@ -7,6 +7,8 @@ name = "bastile"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "nvidia-cutlass" },
+    { name = "nvidia-cutlass-dsl" },
     { name = "transformers" },
 ]
 
@@ -18,6 +20,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "nvidia-cutlass", specifier = ">=4.2.0.0" },
+    { name = "nvidia-cutlass-dsl", specifier = ">=4.3.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "transformers", specifier = ">=4.40.0" },
@@ -64,6 +68,50 @@ version = "0.4.6"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
 wheels = [
     { url = "https://download.pytorch.org/whl/nightly/colorama-0.4.6-py2.py3-none-any.whl" },
+]
+
+[[package]]
+name = "cuda-bindings"
+version = "12.9.4"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+dependencies = [
+    { name = "cuda-pathfinder" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp312-cp312-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp313-cp313-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp313-cp313t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp313-cp313t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp313-cp313t-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp314-cp314-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp314-cp314t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/cu128/cuda_bindings-12.9.4-cp314-cp314t-win_amd64.whl" },
+]
+
+[[package]]
+name = "cuda-pathfinder"
+version = "1.2.2"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/cuda_pathfinder-1.2.2-py3-none-any.whl" },
+]
+
+[[package]]
+name = "cuda-python"
+version = "12.9.0"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+dependencies = [
+    { name = "cuda-bindings" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/cuda_python-12.9.0-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -132,6 +180,15 @@ wheels = [
 ]
 
 [[package]]
+name = "networkx"
+version = "3.6.1"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762" },
+]
+
+[[package]]
 name = "numpy"
 version = "2.4.1"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
@@ -193,6 +250,38 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cutlass"
+version = "4.2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-python" },
+    { name = "networkx" },
+    { name = "numpy" },
+    { name = "pydot" },
+    { name = "scipy" },
+    { name = "treelib" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/6b/e86fc2fd536dd4b8bd2209aa31d7002610c501b0802337787eac9c9b328c/nvidia_cutlass-4.2.0.0-py3-none-any.whl", hash = "sha256:f9599ada45c7bcb6bf53f7d3f0a7d154183e53451c01bfa59eecd37dd4a693f6", size = 6440597, upload-time = "2025-09-19T20:57:32.371Z" },
+]
+
+[[package]]
+name = "nvidia-cutlass-dsl"
+version = "4.3.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-python" },
+    { name = "numpy" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/6c/f45c930f662e0ec7856baa5d4e6f4d1e2ca6b029678f9e05d2df54c865be/nvidia_cutlass_dsl-4.3.5-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:6a79e94d157b16ab34069dd73fb708ff0ef31f486d699b6d5a015217f754cb0b", size = 58739895, upload-time = "2026-01-09T01:38:22.076Z" },
+    { url = "https://files.pythonhosted.org/packages/76/cb/998e79b6f028268bf2653250deb4a2edb618db81244e549ced71112c6f85/nvidia_cutlass_dsl-4.3.5-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:4687eef20c405023daa99dd4653a292fd875d6c9486f8d9a069ff6fcdb00834f", size = 58602784, upload-time = "2026-01-09T01:40:52.873Z" },
+    { url = "https://files.pythonhosted.org/packages/97/09/78a2f9141006f6f1e371a3dfb7a921205bcad6fb27810731169939d3e63d/nvidia_cutlass_dsl-4.3.5-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:9343a5c1335169d791b05aac6fb81e33d7f17c4f8250613a091e6ee8314ed6aa", size = 58738707, upload-time = "2026-01-09T01:39:56.445Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/16/41b88ded92648d99f3c83880c07a54475feded9b32b4425e30d4b34f6c63/nvidia_cutlass_dsl-4.3.5-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:11d19b7e56ae1bedaf736ea3965af3be1e7af6c2482989c414b606cdd406cf32", size = 58601867, upload-time = "2026-01-09T01:37:29.895Z" },
+]
+
+[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
@@ -218,11 +307,30 @@ wheels = [
 ]
 
 [[package]]
+name = "pydot"
+version = "2.0.0"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+dependencies = [
+    { name = "pyparsing" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/pydot-2.0.0-py3-none-any.whl" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.19.2"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
 wheels = [
     { url = "https://download.pytorch.org/whl/nightly/pygments-2.19.2-py3-none-any.whl" },
+]
+
+[[package]]
+name = "pyparsing"
+version = "3.1.2"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/pyparsing-3.1.2-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -338,6 +446,64 @@ wheels = [
 ]
 
 [[package]]
+name = "scipy"
+version = "1.16.2"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-macosx_10_14_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-macosx_12_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-macosx_14_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-macosx_14_0_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp312-cp312-win_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-macosx_10_14_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-macosx_12_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-macosx_14_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-macosx_14_0_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313-win_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-macosx_10_14_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-macosx_12_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-macosx_14_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-macosx_14_0_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp313-cp313t-win_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-macosx_10_14_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-macosx_12_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-macosx_14_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-macosx_14_0_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314-win_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-macosx_10_14_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-macosx_12_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-macosx_14_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-macosx_14_0_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-win_amd64.whl" },
+    { url = "https://download.pytorch.org/whl/nightly/scipy-1.16.2-cp314-cp314t-win_arm64.whl" },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/nightly/six-1.17.0-py2.py3-none-any.whl" },
+]
+
+[[package]]
 name = "tokenizers"
 version = "0.22.0"
 source = { registry = "https://download.pytorch.org/whl/nightly/cu128" }
@@ -385,6 +551,18 @@ dependencies = [
 ]
 wheels = [
     { url = "https://download.pytorch.org/whl/nightly/transformers-4.56.1-py3-none-any.whl" },
+]
+
+[[package]]
+name = "treelib"
+version = "1.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7a/31/145bdbee73d7ee4ac4e879c37faa196a32208b288ca4f308c1ad8db3f010/treelib-1.8.0.tar.gz", hash = "sha256:e1be2c6b66ffbfae85079fc4c76fb4909946d01d915ee29ff6795de53aed5d55", size = 28607, upload-time = "2025-06-29T15:06:49.293Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/24/32361f5d0e2eff7ff1881ac6833b6b090cfe34515b1ee9082636cbe69442/treelib-1.8.0-py3-none-any.whl", hash = "sha256:5235d1ebf988c5026f26ce6e5e0cd470007f16d4978185f5c9b3eee8a25aef81", size = 30728, upload-time = "2025-06-29T15:06:48.248Z" },
 ]
 
 [[package]]
