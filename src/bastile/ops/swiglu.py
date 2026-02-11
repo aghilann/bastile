@@ -80,9 +80,8 @@ def swiglu_backward_kernel(
     gate_f32 = ct.astype(gate_tile, ct.float32)
     up_f32 = ct.astype(up_tile, ct.float32)
 
-    # Recompute sigmoid (save memory vs storing from forward)
-    denom = ct.add(1.0, ct.exp(-gate_f32), flush_to_zero=True)
-    sig_g = ct.truediv(1.0, denom, flush_to_zero=True, rounding_mode=RMd.APPROX)
+    # Recompute sigmoid exactly (no fast-math for backward numerical accuracy)
+    sig_g = ct.truediv(1.0, ct.add(1.0, ct.exp(-gate_f32)))
     silu_g = gate_f32 * sig_g
 
     # d(silu)/d(gate) = sigmoid(g) * (1 + g * (1 - sigmoid(g)))

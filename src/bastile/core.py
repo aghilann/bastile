@@ -82,23 +82,19 @@ def apply(
     rms_norm: bool = True,   # CuTile RMSNorm with full backward (from TileGym)
     swiglu: bool = True,     # CuTile SwiGLU with full backward (from TileGym)
     rope: bool = True,       # CuTile RoPE with autotuning
-    cross_entropy: bool = True,  # Fused cross-entropy loss with in-place gradient
+    cross_entropy: bool = False,  # Deprecated, unused (kept for API compat)
+    fused_linear_cross_entropy: bool = True,  # Fused linear + CE via quack (skips logits)
     model_type: Optional[str] = None,
 ) -> List[str]:
     """
     Apply CuTile kernel patches to PyTorch/HuggingFace.
 
-    Optimizations:
-    - RMSNorm: 17.57x speedup over PyTorch (from TileGym)
-    - SwiGLU: On par with PyTorch (CuTile with full backward)
-    - RoPE: CuTile RoPE with autotuning
-    - Cross-Entropy: Fused cross-entropy loss with in-place gradient
-
     Args:
-        rms_norm: Whether to patch RMSNorm (default: True - CuTile with full backward)
-        swiglu: Whether to patch SwiGLU/MLP (default: True - CuTile with full backward)
-        rope: Whether to patch RoPE (default: True - CuTile with autotuning)
-        cross_entropy: Whether to patch cross-entropy loss (default: True)
+        rms_norm: Whether to patch RMSNorm (default: True)
+        swiglu: Whether to patch SwiGLU/MLP (default: True)
+        rope: Whether to patch RoPE (default: True)
+        cross_entropy: Deprecated, no-op (kept for backwards compatibility)
+        fused_linear_cross_entropy: Whether to use fused linear + CE (default: True)
         model_type: Optional model type filter (e.g., 'qwen3')
 
     Returns:
@@ -106,52 +102,60 @@ def apply(
 
     Example:
         >>> import bastile
-        >>> bastile.apply()  # Apply CuTile optimizations
+        >>> bastile.apply(fused_linear_cross_entropy=True)
     """
     # Import ops to register patches
     from . import ops  # noqa: F401
-    
+
     registry = get_registry()
-    
+
     # Build list of patches to apply based on flags
     patch_filter = {
         'rms_norm': rms_norm,
         'swiglu': swiglu,
         'rope': rope,
-        'cross_entropy': cross_entropy,
     }
-    
+
     applied = []
-    
+
     # Get all patches, optionally filtered by model type
     if model_type:
         patches = registry.get_for_model(model_type)
     else:
         patches = [registry.get(name) for name in registry.list_all()]
         patches = [p for p in patches if p is not None]
-    
+
     for patch in patches:
-            
-        # Check if this patch type is enabled
-        patch_type = patch.name.split('_')[0] if '_' in patch.name else patch.name
-        
         # Find matching filter
         should_apply = True
         for key, enabled in patch_filter.items():
             if key in patch.name or patch.name.startswith(key.split('_')[0]):
                 should_apply = enabled
                 break
-        
+
         if should_apply and _apply_patch(patch):
             applied.append(patch.name)
-    
+
+    # Apply fused linear cross-entropy if requested
+    # This patches Qwen3ForCausalLM.forward to skip logits materialization
+    if fused_linear_cross_entropy:
+        try:
+            from .ops.fused_linear_cross_entropy import bastile_lce_forward
+            import transformers.models.qwen3.modeling_qwen3 as qwen3_module
+
+            qwen3_module.Qwen3ForCausalLM.forward = bastile_lce_forward
+            applied.append("fused_linear_cross_entropy")
+            logger.info("Applied fused linear cross-entropy (skips logits materialization)")
+        except Exception as e:
+            logger.warning(f"Could not apply fused linear cross-entropy: {e}")
+
     # Warmup kernels to avoid JIT overhead during training
     try:
         from .autotune import warmup_all_kernels
         warmup_all_kernels()
     except Exception as e:
         logger.debug(f"Warmup skipped: {e}")
-    
+
     return applied
 
 

@@ -1,13 +1,16 @@
 """
-Qwen3 0.5B Benchmark: PyTorch vs Liger Kernel vs Bastile
-Direct (non-subprocess) benchmark to verify kernel application.
+Qwen3 Benchmark: Raw HuggingFace vs Liger Kernel vs Bastile
 
-Uses Qwen3 model with ~0.5B parameters.
+Compares training performance across three configurations:
+1. Raw HuggingFace (baseline)
+2. Liger Kernel (Triton-based optimizations)
+3. Bastile (CuTile-based optimizations)
 """
 
 import torch
 import gc
 import time
+import inspect
 import importlib
 from typing import Optional, Callable, List
 
@@ -26,7 +29,6 @@ def reset_environment():
     clear_cuda_state()
     reset_peak_memory()
     
-    # Reload Qwen3 module to clear any monkey patches
     import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
     importlib.reload(qwen3_mod)
 
@@ -35,46 +37,46 @@ def run_benchmark(
     name: str,
     setup_fn: Optional[Callable] = None,
     duration_sec: float = 15.0,
-    batch_size: int = 4,
-    seq_len: int = 512,
-    warmup_iterations: Optional[int] = None,
+    batch_size: int = 1,
+    seq_len: int = 4096,
 ) -> E2EBenchmarkResult:
-    """Run training benchmark with real Qwen 0.5B model."""
+    """Run training benchmark."""
     
     reset_environment()
     
     if setup_fn:
-        print(f"  Applying {name} patches...")
-        applied = setup_fn()
-        if applied:
-            print(f"  Patches applied: {applied}")
+        setup_fn()
     
-    from transformers import Qwen3Config, Qwen3ForCausalLM
+    # Import directly from the reloaded module to avoid stale cached references.
+    # (from transformers import Qwen3ForCausalLM returns a cached class
+    #  that doesn't reflect importlib.reload or monkey-patches)
+    from transformers import Qwen3Config
+    import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
+    Qwen3ForCausalLM = qwen3_mod.Qwen3ForCausalLM
     
-    # Qwen3 0.5B-like configuration
     config = Qwen3Config(
-        vocab_size=32000,
-        hidden_size=896,
-        intermediate_size=4864,
-        num_hidden_layers=24,
-        num_attention_heads=14,
-        num_key_value_heads=2,
+        vocab_size=151936,
+        hidden_size=4096,
+        intermediate_size=14336,
+        num_hidden_layers=36,
+        num_attention_heads=32,
+        num_key_value_heads=8,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=32768,
         rms_norm_eps=1e-6,
         tie_word_embeddings=False,
-        head_dim=64,
+        head_dim=128,
     )
     
-    print(f"  Creating Qwen3 model...")
+    # Diagnostic: verify which implementations are active
+    print(f"  RMSNorm: {qwen3_mod.Qwen3RMSNorm.__module__}.{qwen3_mod.Qwen3RMSNorm.__name__}")
+    print(f"  MLP:     {qwen3_mod.Qwen3MLP.__module__}.{qwen3_mod.Qwen3MLP.__name__}")
+    print(f"  RoPE:    {qwen3_mod.apply_rotary_pos_emb.__module__}.{qwen3_mod.apply_rotary_pos_emb.__name__}")
+    print(f"  Forward: {inspect.getfile(Qwen3ForCausalLM.forward)}")
+    
     model = Qwen3ForCausalLM(config)
     model = model.cuda().to(torch.bfloat16)
     model.train()
-    
-    config = model.config
-    print(f"  Model: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
-    print(f"  Config: {config.num_hidden_layers} layers, {config.hidden_size} hidden")
-    print(f"  Batch: {batch_size} x {seq_len} = {batch_size * seq_len} tokens/iter")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     
@@ -83,12 +85,8 @@ def run_benchmark(
     attention_mask = torch.ones_like(input_ids)
     tokens_per_iter = batch_size * seq_len
     
-    # Warmup (more iterations for kernel autotuning)
-    if warmup_iterations is None:
-        warmup_iters = 20 if setup_fn else 5
-    else:
-        warmup_iters = warmup_iterations
-    print(f"  Warming up ({warmup_iters} iterations)...")
+    # Warmup
+    warmup_iters = 10
     for _ in range(warmup_iters):
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -99,7 +97,6 @@ def run_benchmark(
     reset_peak_memory()
     
     # Benchmark
-    print(f"  Running benchmark for {duration_sec:.0f} seconds...")
     iterations = 0
     losses = []
     iter_times = []
@@ -122,13 +119,8 @@ def run_benchmark(
         losses.append(loss.item())
         iterations += 1
         
-        elapsed = iter_end - start_time
-        if elapsed >= duration_sec:
+        if iter_end - start_time >= duration_sec:
             break
-        
-        if iterations % 10 == 0:
-            tps = (iterations * tokens_per_iter) / elapsed
-            print(f"    Iter {iterations}: {tps:.0f} tok/s, loss={loss.item():.4f}")
     
     total_time = time.perf_counter() - start_time
     
@@ -144,9 +136,6 @@ def run_benchmark(
         loss_history=losses,
     )
     
-    print(f"  Complete: {result.iterations} iters, {result.tokens_per_sec:.0f} tok/s, "
-          f"{result.avg_iter_ms:.1f} ms/iter, {result.peak_memory_gb:.2f} GB")
-    
     # Cleanup
     del model, optimizer
     clear_cuda_state()
@@ -157,72 +146,68 @@ def run_benchmark(
 def setup_liger():
     """Apply Liger Kernel patches."""
     from liger_kernel.transformers import apply_liger_kernel_to_qwen3
-    apply_liger_kernel_to_qwen3(
-        rope=True,
-        rms_norm=True,
-        swiglu=True,
-        fused_linear_cross_entropy=True,
-    )
-    return "rope, rms_norm, swiglu, fused_linear_cross_entropy"
+    apply_liger_kernel_to_qwen3()
 
 
 def setup_bastile():
     """Apply Bastile patches."""
     import bastile
     bastile.reset()
-    applied = bastile.apply(
+    bastile.apply(
         rms_norm=True, 
         swiglu=True, 
         rope=True,           
-        cross_entropy=True
+        fused_linear_cross_entropy=True,
     )
-    return applied
 
 
 def main():
-    print("=" * 80)
-    print("Qwen3 0.5B Direct Benchmark: PyTorch vs Liger Kernel vs Bastile")
-    print("=" * 80)
-    print("\nQwen3 ~0.5B model, batch=4, seq=512, 15 sec each")
-    print("(Direct execution without subprocess isolation)")
+    print("=" * 75)
+    print("Qwen3 Benchmark: HuggingFace vs Liger Kernel vs Bastile")
+    print("=" * 75)
+    print("\nConfig: Qwen3-8B (36 layers, 4096 hidden, 32 heads), batch=1, seq=4096, 15 sec each")
     
     print_gpu_info()
     
     results: List[E2EBenchmarkResult] = []
     
-    # 1. PyTorch Baseline
-    print_header("Benchmark: PyTorch (Baseline)", 80)
-    pytorch_result = run_benchmark("PyTorch", setup_fn=None)
-    results.append(pytorch_result)
+    # 1. Raw HuggingFace
+    print("\n[1/3] Running Raw HuggingFace...")
+    hf_result = run_benchmark("HuggingFace", setup_fn=None)
+    results.append(hf_result)
+    print(f"      {hf_result.iterations} iters, {hf_result.tokens_per_sec:.0f} tok/s, "
+          f"{hf_result.peak_memory_gb:.2f} GB")
     
     # 2. Liger Kernel
-    print_header("Benchmark: Liger Kernel", 80)
+    print("[2/3] Running Liger Kernel...")
     try:
         liger_result = run_benchmark("Liger", setup_fn=setup_liger)
         results.append(liger_result)
+        print(f"      {liger_result.iterations} iters, {liger_result.tokens_per_sec:.0f} tok/s, "
+              f"{liger_result.peak_memory_gb:.2f} GB")
     except Exception as e:
-        print(f"  Error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"      Error: {e}")
         liger_result = None
     
     # 3. Bastile
-    print_header("Benchmark: Bastile", 80)
+    print("[3/3] Running Bastile...")
     reset_environment()
-    bastile_result = run_benchmark("Bastile", setup_fn=setup_bastile, warmup_iterations=50)
+    bastile_result = run_benchmark("Bastile", setup_fn=setup_bastile)
     results.append(bastile_result)
+    print(f"      {bastile_result.iterations} iters, {bastile_result.tokens_per_sec:.0f} tok/s, "
+          f"{bastile_result.peak_memory_gb:.2f} GB")
     
     # Reset Bastile
     import bastile
     bastile.reset()
     
     # Results table
-    print_header("RESULTS", 80)
+    print_header("RESULTS", 75)
     
-    baseline = pytorch_result
+    baseline = hf_result
     
     print(f"\n  {'Config':<15} {'Tokens/sec':>12} {'Speedup':>10} {'Iter (ms)':>12} {'Memory':>10} {'Loss':>12}")
-    print(f"  {'-'*78}")
+    print(f"  {'-'*73}")
     
     for r in results:
         speedup = r.tokens_per_sec / baseline.tokens_per_sec
@@ -230,9 +215,9 @@ def main():
               f"{r.peak_memory_gb:>9.2f}GB {r.final_loss:>12.4f}")
     
     # Summary
-    print_header("SUMMARY", 80)
+    print_header("SUMMARY", 75)
     
-    print(f"\n  Baseline: PyTorch ({baseline.tokens_per_sec:,.0f} tokens/sec, {baseline.peak_memory_gb:.2f} GB)")
+    print(f"\n  Baseline: HuggingFace ({baseline.tokens_per_sec:,.0f} tokens/sec)")
     
     for r in results[1:]:
         speedup = (r.tokens_per_sec / baseline.tokens_per_sec - 1) * 100
@@ -240,7 +225,7 @@ def main():
         sign = "+" if speedup >= 0 else ""
         print(f"  {r.name}: {sign}{speedup:.1f}% throughput, {mem_saved:+.2f} GB memory")
     
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 75)
 
 
 if __name__ == "__main__":
