@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Monkey-patch PyTorch with optimized CuTile kernels for training (forward + backward)"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     { name = "Aghilan", email = "aghilan@example.com" }
 ]
