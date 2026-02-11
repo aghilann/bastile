@@ -113,7 +113,7 @@ def setup_liger():
 def setup_bastile():
     import bastile
     bastile.reset()
-    applied = bastile.apply(rms_norm=True, swiglu=True, rope=True, cross_entropy=True)
+    applied = bastile.apply(rms_norm=True, swiglu=True, rope=True, fused_linear_cross_entropy=True)
     return applied
 
 

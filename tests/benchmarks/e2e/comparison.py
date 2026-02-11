@@ -144,7 +144,7 @@ def setup_bastile():
         rms_norm=True, 
         swiglu=True, 
         rope=True,           
-        cross_entropy=True
+        fused_linear_cross_entropy=True,
     )
 
 

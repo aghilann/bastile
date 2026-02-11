@@ -42,7 +42,7 @@ def run(mode, duration=15.0):
 
     if mode == "bastile":
         import bastile
-        applied = bastile.apply(rms_norm=True, swiglu=True, rope=True, cross_entropy=True)
+        applied = bastile.apply(rms_norm=True, swiglu=True, rope=True, fused_linear_cross_entropy=True)
         print(f"  Patches applied: {applied}", file=sys.stderr)
     elif mode == "liger":
         from liger_kernel.transformers import apply_liger_kernel_to_qwen3
