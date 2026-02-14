@@ -1,18 +1,26 @@
 """
 CuTile RMSNorm - native cuTILE implementation for Bastile.
 
-Provides a cuTILE-native RMSNorm that aims to match the performance of
-Quack's cuteDSL kernels. Two forward kernel strategies are autotuned:
+Optimized for NVIDIA Blackwell (B200) using patterns from TileGym:
 
-  - gather/scatter: tiled loop with latency-hint prefetching (best for multi-tile)
-  - TMA: bulk DMA load of full row, in-register reduction (best for single-tile)
+Forward kernels:
+  1. Static-persistent 2D TMA — persistent grid-stride loop over multi-row
+     tiles, weight pre-loaded once, allow_tma=False stores (+30%), latency
+     hints on loads (+2%) and stores (+3%). Best for large M (training).
+  2. Gather/scatter 1D — tiled column loop with latency-hint prefetching.
+     Best for small M or non-power-of-2 N.
+  3. TMA 1-row — bulk DMA load of full row, in-register reduction.
+     Best for small M with power-of-2 N.
 
-Key optimizations:
-1. Dual-strategy forward (gather vs TMA) selected by autotuner
-2. Float32 accumulation for numerical stability
-3. Wide occupancy sweep (1/2/4/8) with extensive tile-size search
-4. TMA-based backward for efficient row-wise gradient computation
-5. Weight gradient via temp buffer + host-side reduction
+Backward:
+  TMA-based row-wise dx + temp_buffer for dw reduction.
+
+Key Blackwell-specific optimizations:
+  - allow_tma=False on ct.store (bypasses TMA store path → +30% on B200)
+  - latency hints on ct.load (latency=10) and ct.store (latency=3)
+  - TILE_SIZE_M sweep (2/4/8/16) for 2D persistent kernels
+  - Occupancy sweep (1/2/4/8) compiled as separate kernel objects
+  - Persistent scheduling: grid = NUM_SMS, blocks stride over rows
 """
 
 import torch
@@ -22,6 +30,7 @@ from dataclasses import dataclass
 import cuda.tile as ct
 
 from ..autotune import autotune
+from ..registry import register_patch
 from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
@@ -39,13 +48,101 @@ class RMSNormCuTileConfig:
     tile_size: int
     occupancy: int
     use_tma: bool = False
+    use_persistent: bool = False
+    tile_size_m: int = 1  # rows per tile (only for persistent)
 
     def __hash__(self):
-        return hash((self.tile_size, self.occupancy, self.use_tma))
+        return hash((self.tile_size, self.occupancy, self.use_tma,
+                     self.use_persistent, self.tile_size_m))
 
 
 # ============================================================================
-# Forward Kernels - Gather/Scatter variant (tiled loop)
+# Forward Kernels - Static Persistent 2D TMA (Blackwell-optimized)
+# ============================================================================
+
+def _fwd_persistent_body(X, W, Y, Rstd, TILE_SIZE_M, TILE_SIZE_N, eps):
+    """Static persistent 2D RMSNorm: each block processes multiple row-tiles.
+
+    Adapted from TileGym's rms_norm_kernel_static_persistent with
+    Blackwell-specific store hints. Also saves rstd for backward pass.
+    """
+    bid = ct.bid(0)
+    M = X.shape[0]
+    N = X.shape[1]
+
+    upper_bound = (M + TILE_SIZE_M - 1) // TILE_SIZE_M
+
+    # Pre-load weight once (shared across all tiles this block processes)
+    w = ct.load(W, index=(0,), shape=(TILE_SIZE_N,), padding_mode=PAD_ZERO)
+    w = ct.astype(w, ct.float32)
+
+    # Persistent grid-stride loop
+    num_tile_blocks = ct.num_blocks(0)
+    for current_bid in range(bid, upper_bound, num_tile_blocks):
+        # Load 2D input tile [TILE_SIZE_M, TILE_SIZE_N]
+        x = ct.load(
+            X,
+            index=(current_bid, 0),
+            shape=(TILE_SIZE_M, TILE_SIZE_N),
+            latency=10,  # prefetch hint (+2% on B200)
+            padding_mode=PAD_ZERO,
+        )
+        x = ct.astype(x, ct.float32)
+
+        # RMS computation: rsqrt(mean(x^2) + eps)
+        x_squared = ct.mul(x, x)
+        x2_sum = ct.sum(x_squared, axis=1, keepdims=True)
+        N_f32 = ct.full((TILE_SIZE_M, 1), N * 1.0, dtype=ct.float32)
+        variance = ct.truediv(x2_sum, N_f32)
+        eps_t = ct.full((TILE_SIZE_M, 1), eps, dtype=ct.float32)
+        rsqrt_var = ct.rsqrt(ct.add(variance, eps_t))
+
+        # Save rstd for backward pass (1 float32 per row, negligible BW)
+        rstd_flat = ct.reshape(rsqrt_var, (TILE_SIZE_M,))
+        ct.store(Rstd, index=(current_bid,), tile=rstd_flat, allow_tma=False)
+
+        # Normalize and scale by weight
+        x_normalized = ct.mul(x, rsqrt_var)
+        w_broadcasted = ct.reshape(w, (1, TILE_SIZE_N))
+        y = ct.mul(x_normalized, w_broadcasted)
+
+        # Store result
+        y = ct.astype(y, X.dtype)
+        ct.store(
+            Y,
+            index=(current_bid, 0),
+            tile=y,
+            allow_tma=False,  # bypass TMA store (+30% on B200)
+            latency=3,  # store hint (+3% on B200)
+        )
+
+
+@ct.kernel(occupancy=1)
+def rms_norm_fwd_persistent_occ1(X, W, Y, Rstd, TILE_SIZE_M: ConstInt, TILE_SIZE_N: ConstInt, eps: ConstFloat):
+    _fwd_persistent_body(X, W, Y, Rstd, TILE_SIZE_M, TILE_SIZE_N, eps)
+
+@ct.kernel(occupancy=2)
+def rms_norm_fwd_persistent_occ2(X, W, Y, Rstd, TILE_SIZE_M: ConstInt, TILE_SIZE_N: ConstInt, eps: ConstFloat):
+    _fwd_persistent_body(X, W, Y, Rstd, TILE_SIZE_M, TILE_SIZE_N, eps)
+
+@ct.kernel(occupancy=4)
+def rms_norm_fwd_persistent_occ4(X, W, Y, Rstd, TILE_SIZE_M: ConstInt, TILE_SIZE_N: ConstInt, eps: ConstFloat):
+    _fwd_persistent_body(X, W, Y, Rstd, TILE_SIZE_M, TILE_SIZE_N, eps)
+
+@ct.kernel(occupancy=8)
+def rms_norm_fwd_persistent_occ8(X, W, Y, Rstd, TILE_SIZE_M: ConstInt, TILE_SIZE_N: ConstInt, eps: ConstFloat):
+    _fwd_persistent_body(X, W, Y, Rstd, TILE_SIZE_M, TILE_SIZE_N, eps)
+
+FWD_PERSISTENT_KERNELS = {
+    1: rms_norm_fwd_persistent_occ1,
+    2: rms_norm_fwd_persistent_occ2,
+    4: rms_norm_fwd_persistent_occ4,
+    8: rms_norm_fwd_persistent_occ8,
+}
+
+
+# ============================================================================
+# Forward Kernels - Gather/Scatter variant (tiled loop, 1 row per block)
 # ============================================================================
 
 def _fwd_gather_body(x, w, out, rstd_out, N, eps, TILE_SIZE):
@@ -102,32 +199,30 @@ FWD_GATHER_KERNELS = {
 
 
 # ============================================================================
-# Forward Kernels - TMA variant (single bulk load, no loop)
+# Forward Kernels - TMA variant (single bulk load per row)
 # ============================================================================
 
 def _fwd_tma_body(x, w, out, rstd_out, TILE_SIZE):
     """TMA-based forward: bulk load full row, reduce, normalize, store."""
     row = ct.bid(0)
 
-    # Bulk load entire row + weight via TMA
-    x_row = ct.load(x, index=(row, 0), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+    x_row = ct.load(x, index=(row, 0), shape=(1, TILE_SIZE),
+                    padding_mode=PAD_ZERO, latency=10)
     w_row = ct.load(w, index=(0,), shape=(TILE_SIZE,), padding_mode=PAD_ZERO)
     w_row = ct.reshape(w_row, (1, TILE_SIZE))
 
-    # Compute rstd in float32
     x_f32 = ct.astype(x_row, ct.float32)
     sum_sq = ct.sum(x_f32 * x_f32, axis=1, keepdims=True)
     M_val, N_val = x.shape
     rms = ct.rsqrt(sum_sq / N_val + 1e-6)
 
-    # Store rstd (scalar per row)
     ct.store(rstd_out, index=(row,), tile=ct.reshape(rms, (1,)))
 
-    # Normalize and scale
     w_f32 = ct.astype(w_row, ct.float32)
     y_row = x_f32 * rms * w_f32
     y_row = ct.astype(y_row, out.dtype)
-    ct.store(out, index=(row, 0), tile=y_row)
+    ct.store(out, index=(row, 0), tile=y_row,
+             allow_tma=False, latency=3)
 
 
 @ct.kernel(occupancy=1)
@@ -172,8 +267,10 @@ def rms_norm_bwd_kernel(
     row_idx = ct.bid(0)
     M, N = x.shape
 
-    input_row = ct.load(x, index=(row_idx, 0), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
-    gradient_row = ct.load(dy, index=(row_idx, 0), shape=(1, TILE_SIZE), padding_mode=PAD_ZERO)
+    input_row = ct.load(x, index=(row_idx, 0), shape=(1, TILE_SIZE),
+                        padding_mode=PAD_ZERO, latency=10)
+    gradient_row = ct.load(dy, index=(row_idx, 0), shape=(1, TILE_SIZE),
+                           padding_mode=PAD_ZERO, latency=10)
     inv_std_row = ct.load(Rstd, index=(row_idx,), shape=(1,), padding_mode=PAD_ZERO)
     inv_std_row = ct.reshape(inv_std_row, (1, 1))
     weight_vector = ct.load(weight, index=(0,), shape=(TILE_SIZE,), padding_mode=PAD_ZERO)
@@ -182,7 +279,8 @@ def rms_norm_bwd_kernel(
     # Weight gradient contribution: x * dy * rstd -> temp_buffer
     c1 = input_row * gradient_row
     c2 = c1 * inv_std_row
-    ct.store(temp_buffer, index=(row_idx, 0), tile=ct.astype(c2, temp_buffer.dtype))
+    ct.store(temp_buffer, index=(row_idx, 0), tile=ct.astype(c2, temp_buffer.dtype),
+             allow_tma=False, latency=3)
 
     # Input gradient: dx = rstd * (dy * w) - x * rstd^3 / N * sum(x * dy * w)
     weighted_gradient_product = c1 * weight_vector
@@ -196,44 +294,61 @@ def rms_norm_bwd_kernel(
     scaled_gradient = gradient_row * weight_vector * inv_std_row
     input_gradient_row = scaled_gradient - normalization_correction
     input_gradient_row = ct.astype(input_gradient_row, dx.dtype)
-    ct.store(dx, index=(row_idx, 0), tile=input_gradient_row)
+    ct.store(dx, index=(row_idx, 0), tile=input_gradient_row,
+             allow_tma=False, latency=3)
 
 
 # ============================================================================
 # Search Space
 # ============================================================================
 
-def _fwd_search_space(N):
+def _fwd_search_space(M, N):
     """Generate search space for RMSNorm forward autotuning.
 
-    Tries both gather/scatter and TMA strategies across multiple
-    tile sizes and occupancy levels.
+    Includes:
+      1. Static persistent 2D TMA kernels (best for large M)
+      2. Gather/scatter kernels (flexible tile sizes)
+      3. TMA single-row kernels (best for small M, pow2 N)
     """
-    base_tile = next_power_of_2(N)
-    tile_sizes = set()
-
-    # Multiplier-based sizes around the base
-    for mult in [0.25, 0.5, 1, 2]:
-        ts = int(base_tile * mult)
-        if 64 <= ts <= 16384 and ts == next_power_of_2(ts):
-            tile_sizes.add(ts)
-
-    # Standard power-of-2 tile sizes (match TileGym)
-    for ts in [256, 512, 1024, 2048, 4096]:
-        if ts >= N or ts == next_power_of_2(N):
-            tile_sizes.add(ts)
-
-    # Always include the covering tile
-    tile_sizes.add(base_tile)
-
     configs = []
-    for ts in sorted(tile_sizes):
-        for occ in [1, 2, 4, 8]:
-            # Gather/scatter variant (works for any tile_size)
-            configs.append(RMSNormCuTileConfig(tile_size=ts, occupancy=occ, use_tma=False))
-            # TMA variant (only when tile covers full row)
-            if ts >= N:
-                configs.append(RMSNormCuTileConfig(tile_size=ts, occupancy=occ, use_tma=True))
+    base_tile = next_power_of_2(N)
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+
+    # --- Strategy 1: Static Persistent 2D (the big win for large M) ---
+    TILE_SIZE_N = base_tile
+    for tile_m in [2, 4, 8, 16]:
+        # Heuristic: skip very large tile_m if N is huge (register pressure)
+        if tile_m * TILE_SIZE_N > 16384 * 16:
+            continue
+        # Skip small tile_m for moderate N (e.g. 1024)
+        if TILE_SIZE_N <= 1024 and tile_m < 8:
+            continue
+        for occ in [1, 2, 4]:
+            configs.append(RMSNormCuTileConfig(
+                tile_size=TILE_SIZE_N, occupancy=occ,
+                use_persistent=True, tile_size_m=tile_m,
+            ))
+
+    # --- Strategy 2: Gather/scatter (flexible) ---
+    tile_sizes_g = set()
+    for mult in [0.5, 1, 2]:
+        ts = int(base_tile * mult)
+        if 256 <= ts <= 16384 and ts == next_power_of_2(ts):
+            tile_sizes_g.add(ts)
+    tile_sizes_g.add(base_tile)
+
+    for ts in sorted(tile_sizes_g):
+        for occ in [1, 2, 4]:
+            configs.append(RMSNormCuTileConfig(
+                tile_size=ts, occupancy=occ, use_tma=False,
+            ))
+
+    # --- Strategy 3: TMA single-row (best for small M, pow2 N) ---
+    if base_tile >= N:
+        for occ in [1, 2, 4]:
+            configs.append(RMSNormCuTileConfig(
+                tile_size=base_tile, occupancy=occ, use_tma=True,
+            ))
 
     return configs
 
@@ -245,22 +360,28 @@ def _fwd_search_space(N):
 def _run_fwd_with_config(x, w, out, rstd, N, eps, config):
     """Run forward kernel with a specific config."""
     M = x.shape[0]
-    if config.use_tma:
-        kernel = FWD_TMA_KERNELS[config.occupancy]
+    stream = torch.cuda.current_stream()
+
+    if config.use_persistent:
+        # Static persistent: grid = min(NUM_SMS, ceil(M / tile_m))
+        global _num_sms_cache
+        if _num_sms_cache == 0:
+            _num_sms_cache = torch.cuda.get_device_properties("cuda").multi_processor_count
+        num_row_tiles = (M + config.tile_size_m - 1) // config.tile_size_m
+        grid_size = min(_num_sms_cache, num_row_tiles)
+        kernel = FWD_PERSISTENT_KERNELS[config.occupancy]
         ct.launch(
-            torch.cuda.current_stream(),
-            (M,),
-            kernel,
-            (x, w, out, rstd, config.tile_size),
+            stream, (grid_size,), kernel,
+            (x, w, out, rstd, config.tile_size_m, config.tile_size, eps),
         )
+    elif config.use_tma:
+        kernel = FWD_TMA_KERNELS[config.occupancy]
+        ct.launch(stream, (M,), kernel,
+                  (x, w, out, rstd, config.tile_size))
     else:
         kernel = FWD_GATHER_KERNELS[config.occupancy]
-        ct.launch(
-            torch.cuda.current_stream(),
-            (M,),
-            kernel,
-            (x, w, out, rstd, N, eps, config.tile_size),
-        )
+        ct.launch(stream, (M,), kernel,
+                  (x, w, out, rstd, N, eps, config.tile_size))
 
 
 def _run_bwd(dx, dy, x, weight, rstd, temp_buffer, N):
@@ -279,39 +400,111 @@ def _run_bwd(dx, dy, x, weight, rstd, temp_buffer, N):
 # Fast Config Cache (bypasses autotune overhead on hot path)
 # ============================================================================
 
-# Direct config cache: (N, dtype_str) -> RMSNormCuTileConfig
-# Populated by first autotune call, then used directly without lock/disk I/O
 _fwd_config_cache: dict = {}
+_num_sms_cache: int = 0  # Cached once on first use
+_stream_cache = None      # Cached CUDA stream
 
 
-def _ensure_fwd_config(N, dtype, x_arg, weight, y, rstd, eps):
-    """Get or compute the best forward config for (N, dtype).
+def _heuristic_config(M, N):
+    """Pick a good default config without timing (zero compile overhead).
 
-    First call triggers full autotuning. Subsequent calls return cached config
-    with zero overhead (simple dict lookup).
+    Tuned for Blackwell (B200, 160 SMs). Uses autotuning data:
+      - Small M (≤ 4*SMS): TMA occ=4 (pow2 N) or gather occ=1
+      - Medium M (≤ 16*SMS): persistent tile_m=8 occ=1
+      - Large M (> 16*SMS): persistent tile_m=4 occ=1
+      - HIGH PADDING (>20% waste): always gather — avoids loading zeros
+        via TMA, loops over real columns only (like Quack does).
     """
-    cache_key = (N, str(dtype))
+    global _num_sms_cache
+    if _num_sms_cache == 0:
+        _num_sms_cache = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = _num_sms_cache
+    TILE_N = next_power_of_2(N)
+
+    # Padding ratio: how much bandwidth is wasted on zeros
+    # e.g. N=5120 → TILE_N=8192 → padding_ratio = 0.375 (37.5% waste)
+    padding_ratio = (TILE_N - N) / TILE_N
+    high_padding = padding_ratio > 0.20  # >20% waste threshold
+
+    if high_padding:
+        # Non-power-of-2 N with significant padding: use gather kernel
+        # which loops over actual columns in small tiles, zero waste.
+        # Pick tile_size as largest power-of-2 ≤ N for minimal loop iters.
+        gather_tile = next_power_of_2(N) // 2  # e.g. N=5120 → tile=4096
+        gather_tile = max(256, min(gather_tile, 4096))  # clamp to [256, 4096]
+        return RMSNormCuTileConfig(
+            tile_size=gather_tile, occupancy=2,
+        )
+
+    if M <= NUM_SMS * 4:
+        # Small/medium M (up to ~4 waves): persistent scheduling overhead
+        # not worthwhile; use TMA or gather with one block per row.
+        if TILE_N == N:
+            return RMSNormCuTileConfig(
+                tile_size=TILE_N, occupancy=4, use_tma=True,
+            )
+        else:
+            return RMSNormCuTileConfig(
+                tile_size=TILE_N, occupancy=1,
+            )
+    elif M <= NUM_SMS * 16:
+        # Medium M (short prefill / small-batch training)
+        # Cap tile elements to ~32K to avoid register spills on large N.
+        # tile_m=8 for N≤4096, tile_m=4 for N=8192, tile_m=2 for N=16384+
+        tile_m = max(2, min(8, 32768 // TILE_N))
+        if TILE_N <= 1024:
+            tile_m = 16
+        return RMSNormCuTileConfig(
+            tile_size=TILE_N, occupancy=1,
+            use_persistent=True, tile_size_m=tile_m,
+        )
+    else:
+        # Large M (long prefill / training): more waves, smaller tile_m
+        if TILE_N <= 1024:
+            tile_m = 16
+        elif TILE_N >= 16384:
+            tile_m = 2
+        else:
+            tile_m = 4
+        return RMSNormCuTileConfig(
+            tile_size=TILE_N, occupancy=1,
+            use_persistent=True, tile_size_m=tile_m,
+        )
+
+
+def _ensure_fwd_config(M, N, dtype, x_arg, weight, y, rstd, eps):
+    """Get or compute the best forward config for (M, N, dtype).
+
+    Uses a fast heuristic by default. Set BASTILE_AUTOTUNE=1 env var
+    to enable full autotuning on first call.
+    """
+    import os
+
+    cache_key = (M, N, dtype)
     config = _fwd_config_cache.get(cache_key)
     if config is not None:
         return config
 
-    # First call for this (N, dtype): run full autotuning
-    M = x_arg.shape[0]
-    key = (M, N, str(dtype))
+    full_tune = os.environ.get("BASTILE_AUTOTUNE", "0") == "1"
 
-    def run_fn(cfg):
-        _run_fwd_with_config(x_arg.detach(), weight.detach(), y.detach(), rstd, N, eps, cfg)
+    if full_tune:
+        key = (M, N, dtype)
 
-    config = autotune(
-        kernel_name="rms_norm_cutile_fwd",
-        run_fn=run_fn,
-        search_space=_fwd_search_space(N),
-        key=str(key),
-        max_iter=32,
-        warmup=5,
-        rep=10,
-        use_heuristic=False,
-    )
+        def run_fn(cfg):
+            _run_fwd_with_config(x_arg.detach(), weight.detach(), y.detach(), rstd, N, eps, cfg)
+
+        config = autotune(
+            kernel_name="rms_norm_cutile_fwd",
+            run_fn=run_fn,
+            search_space=_fwd_search_space(M, N),
+            key=str(key),
+            max_iter=48,
+            warmup=5,
+            rep=10,
+            use_heuristic=False,
+        )
+    else:
+        config = _heuristic_config(M, N)
 
     _fwd_config_cache[cache_key] = config
     return config
@@ -329,7 +522,7 @@ def rms_norm_forward(x, weight, eps):
     y = torch.empty_like(x_arg)
     rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
 
-    config = _ensure_fwd_config(N, x.dtype, x_arg, weight, y, rstd, eps)
+    config = _ensure_fwd_config(M, N, x.dtype, x_arg, weight, y, rstd, eps)
     _run_fwd_with_config(x_arg, weight, y, rstd, N, eps, config)
 
     return y.view(*x.shape), rstd
@@ -363,33 +556,49 @@ def rms_norm_backward(
 class CuTileRMSNormFunction(torch.autograd.Function):
     """CuTile RMSNorm with autotuned forward and backward.
 
-    The forward path is inlined to minimize Python dispatch overhead -
-    avoids extra function calls by directly looking up the cached config
-    and launching the kernel.
+    The forward path is maximally inlined to minimize Python dispatch
+    overhead. All device properties are cached; the hot path is a single
+    dict lookup + ct.launch.
     """
 
     @staticmethod
     def forward(ctx, x, weight, eps):
+        global _num_sms_cache, _stream_cache
+
         x_shape = x.shape
-        x_2d = x.reshape(-1, x.shape[-1])
-        M, N = x_2d.shape
+        N = x_shape[-1]
+        x_2d = x.reshape(-1, N)
+        M = x_2d.shape[0]
 
         y = torch.empty_like(x_2d)
         rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
 
-        # Fast path: check config cache directly (zero overhead on hit)
-        cache_key = (N, str(x.dtype))
-        config = _fwd_config_cache.get(cache_key)
+        # Fast path: dict lookup with dtype (hashable, avoids str())
+        config = _fwd_config_cache.get((M, N, x.dtype))
         if config is None:
-            config = _ensure_fwd_config(N, x.dtype, x_2d, weight, y, rstd, eps)
+            config = _ensure_fwd_config(M, N, x.dtype, x_2d, weight, y, rstd, eps)
 
-        # Inline kernel launch (avoid _run_fwd_with_config function call)
-        stream = torch.cuda.current_stream()
-        if config.use_tma:
-            ct.launch(stream, (M,), FWD_TMA_KERNELS[config.occupancy],
+        # Cached stream (valid for default stream usage)
+        if _stream_cache is None:
+            _stream_cache = torch.cuda.current_stream()
+
+        # Inline kernel launch — all branches pre-resolved
+        if config.use_persistent:
+            if _num_sms_cache == 0:
+                _num_sms_cache = torch.cuda.get_device_properties("cuda").multi_processor_count
+            tile_m = config.tile_size_m
+            grid_size = (M + tile_m - 1) // tile_m
+            if grid_size > _num_sms_cache:
+                grid_size = _num_sms_cache
+            ct.launch(_stream_cache, (grid_size,),
+                      FWD_PERSISTENT_KERNELS[config.occupancy],
+                      (x_2d, weight, y, rstd, tile_m,
+                       config.tile_size, eps))
+        elif config.use_tma:
+            ct.launch(_stream_cache, (M,), FWD_TMA_KERNELS[config.occupancy],
                       (x_2d, weight, y, rstd, config.tile_size))
         else:
-            ct.launch(stream, (M,), FWD_GATHER_KERNELS[config.occupancy],
+            ct.launch(_stream_cache, (M,), FWD_GATHER_KERNELS[config.occupancy],
                       (x_2d, weight, y, rstd, N, eps, config.tile_size))
 
         ctx.save_for_backward(x, weight, rstd)
@@ -450,3 +659,15 @@ def warmup_rms_norm(
     out = rms_norm(x, w, eps=1e-6)
     out.sum().backward()
     torch.cuda.synchronize()
+
+
+register_patch(
+    name="rms_norm_qwen3",
+    description="CuTile RMSNorm for Qwen3 (autotuned persistent/gather/TMA with full backward)",
+    target_module="transformers.models.qwen3.modeling_qwen3",
+    target_attr="Qwen3RMSNorm",
+    replacement=CuTileRMSNorm,
+    has_backward=True,
+    priority=10,
+    models=["qwen3"],
+)

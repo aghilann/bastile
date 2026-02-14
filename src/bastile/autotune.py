@@ -269,7 +269,7 @@ def warmup_all_kernels(
 
     # Import kernels
     try:
-        from .ops.rms_norm import rms_norm, CuTileRMSNorm
+        from .ops.rms_norm_cutile import rms_norm, CuTileRMSNorm
         from .ops.swiglu import swiglu, CuTileSwiGLUMLP
 
         BT = batch_size * seq_len
