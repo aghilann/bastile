@@ -156,7 +156,7 @@ def setup_bastile():
     bastile.apply(
         rms_norm=True, 
         swiglu=True, 
-        rope=True,           
+        rope=False,  # CuTile rope compiler fails on B200 sm_100
         fused_linear_cross_entropy=True,
     )
 

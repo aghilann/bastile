@@ -19,6 +19,7 @@ classifiers = [
 
 dependencies = [
     "torch>=2.4.0",
+    "torchvision>=0.17.0",
     "nvidia-cutlass>=4.2.0.0",
     "nvidia-cutlass-dsl>=4.3.5",
     "transformers>=4.40.0",
@@ -54,5 +55,12 @@ include = ["src/bastile"]
 path = "src/bastile/__init__.py"
 
 [tool.uv]
-# PyTorch with CUDA 12.8 for CuTile support
-extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
