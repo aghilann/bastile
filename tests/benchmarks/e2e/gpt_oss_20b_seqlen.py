@@ -240,38 +240,8 @@ def setup_bastile():
         swiglu=False,  # GPT-OSS uses custom MoE gating, not standard SwiGLU
         rope=True,
         fused_linear_cross_entropy=True,
-        moe_gate=True,
         moe_experts=True,
-    )
-    return applied
-
-
-def setup_bastile_moe_only():
-    """Setup with ONLY the MoE expert gate kernel enabled."""
-    import bastile
-    bastile.reset()
-    applied = bastile.apply(
-        rms_norm=False,
-        swiglu=False,
-        rope=False,
-        fused_linear_cross_entropy=False,
-        moe_gate=True,
-        moe_experts=False,
-    )
-    return applied
-
-
-def setup_bastile_moe_experts():
-    """Setup with ONLY the MoE experts (grouped_mm) optimization enabled."""
-    import bastile
-    bastile.reset()
-    applied = bastile.apply(
-        rms_norm=False,
-        swiglu=False,
-        rope=False,
-        fused_linear_cross_entropy=False,
-        moe_gate=True,
-        moe_experts=True,
+        moe_router=True,
     )
     return applied
 
@@ -280,8 +250,8 @@ PHASES = {
     "pytorch":              ("PyTorch",              None),
     "liger":                ("Liger",                setup_liger),
     "bastile":              ("Bastile",              setup_bastile),
-    "bastile_moe":          ("Bastile-MoE",          setup_bastile_moe_only),
-    "bastile_moe_experts":  ("Bastile-MoEExperts",   setup_bastile_moe_experts),
+    # "bastile_moe":          ("Bastile-MoE",          setup_bastile_moe_only),
+    # "bastile_moe_experts":  ("Bastile-MoEExperts",   setup_bastile_moe_experts),
 }
 
 

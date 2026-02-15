@@ -189,11 +189,12 @@ def main():
 
     configs = [
         MoEConfig(64, 128, 4, 2880, 2880, torch.bfloat16),
-        MoEConfig(128, 128, 4, 2880, 2880, torch.bfloat16),
         MoEConfig(256, 128, 4, 2880, 2880, torch.bfloat16),
-        MoEConfig(512, 128, 4, 2880, 2880, torch.bfloat16),
         MoEConfig(1024, 128, 4, 2880, 2880, torch.bfloat16),
         MoEConfig(4096, 128, 4, 2880, 2880, torch.bfloat16),
+        MoEConfig(8192, 128, 4, 2880, 2880, torch.bfloat16),
+        MoEConfig(16384, 128, 4, 2880, 2880, torch.bfloat16),
+        MoEConfig(32768, 128, 4, 2880, 2880, torch.bfloat16),
     ]
 
     # Forward only
