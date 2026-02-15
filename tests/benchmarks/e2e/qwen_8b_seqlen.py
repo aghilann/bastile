@@ -534,6 +534,133 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
 
 
 # ============================================================================
+# Chart generation
+# ============================================================================
+
+def plot_results(
+    all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]],
+    assets_dir: Optional[str] = None,
+):
+    """Generate bar charts for throughput, latency, and memory, saving to assets/."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("\n  matplotlib not installed — skipping chart generation")
+        return
+
+    if assets_dir is None:
+        assets_dir = str(Path(__file__).resolve().parents[3] / "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+
+    pytorch = all_results.get("pytorch", {})
+    liger = all_results.get("liger", {})
+    bastile_res = all_results.get("bastile", {})
+
+    configs = [
+        ("PyTorch", pytorch, "#5B8FF9"),
+        ("Liger", liger, "#5AD8A6"),
+        ("Bastile", bastile_res, "#F6BD16"),
+    ]
+
+    # Collect seq_lens that have at least one result
+    active_seq_lens = [sl for sl in SEQ_LENS if any(
+        cfg_data.get(sl) is not None for _, cfg_data, _ in configs
+    )]
+    if not active_seq_lens:
+        print("\n  No results to plot")
+        return
+
+    x = np.arange(len(active_seq_lens))
+    width = 0.25
+
+    def _bar_chart(
+        title: str,
+        ylabel: str,
+        filename: str,
+        get_val,
+        fmt_val=None,
+        higher_is_better: bool = True,
+    ):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        fig.patch.set_facecolor("#FAFAFA")
+        ax.set_facecolor("#FAFAFA")
+
+        for i, (name, data, color) in enumerate(configs):
+            vals = []
+            for sl in active_seq_lens:
+                r = data.get(sl)
+                vals.append(get_val(r) if r is not None else 0)
+            bars = ax.bar(x + (i - 1) * width, vals, width, label=name,
+                          color=color, edgecolor="white", linewidth=0.5,
+                          zorder=3)
+            # Add value labels on bars
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    label = fmt_val(v) if fmt_val else f"{v:.1f}"
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                            label, ha="center", va="bottom", fontsize=7,
+                            fontweight="bold", color="#333")
+
+        ax.set_xlabel("Sequence Length", fontsize=11, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(sl) for sl in active_seq_lens])
+        ax.legend(frameon=True, fancybox=True, shadow=False, fontsize=10)
+        ax.grid(axis="y", alpha=0.3, zorder=0)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        # Mark OOM entries
+        for i, (name, data, color) in enumerate(configs):
+            for j, sl in enumerate(active_seq_lens):
+                if data.get(sl) is None:
+                    ax.text(x[j] + (i - 1) * width, 0, "OOM",
+                            ha="center", va="bottom", fontsize=7,
+                            color="red", fontweight="bold", rotation=90)
+
+        fig.tight_layout()
+        out_path = os.path.join(assets_dir, filename)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {out_path}")
+
+    print(f"\n  Generating charts → {assets_dir}/")
+
+    _bar_chart(
+        title="Qwen3-8B E2E Training — Throughput (tokens/sec)",
+        ylabel="Tokens / sec",
+        filename="bench_8b_throughput.png",
+        get_val=lambda r: r.tokens_per_sec,
+        fmt_val=lambda v: f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}",
+        higher_is_better=True,
+    )
+
+    _bar_chart(
+        title="Qwen3-8B E2E Training — Latency (ms / iteration)",
+        ylabel="ms / iteration",
+        filename="bench_8b_latency.png",
+        get_val=lambda r: r.avg_iter_ms,
+        fmt_val=lambda v: f"{v:.0f}" if v >= 10 else f"{v:.1f}",
+        higher_is_better=False,
+    )
+
+    _bar_chart(
+        title="Qwen3-8B E2E Training — Peak GPU Memory (GB)",
+        ylabel="Peak Memory (GB)",
+        filename="bench_8b_memory.png",
+        get_val=lambda r: r.peak_memory_gb,
+        fmt_val=lambda v: f"{v:.1f}",
+        higher_is_better=False,
+    )
+
+    print("  Done!")
+
+
+# ============================================================================
 # Main entry point
 # ============================================================================
 
@@ -583,6 +710,7 @@ def main():
         all_results = run_parallel(gpus)
 
     print_results(all_results)
+    plot_results(all_results)
 
 
 if __name__ == "__main__":

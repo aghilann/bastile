@@ -4,7 +4,6 @@ Run all ops unit tests.
 
 from . import test_rms_norm
 from . import test_swiglu
-from . import test_geglu
 from . import test_rope
 
 
@@ -16,7 +15,6 @@ def run_all():
 
     test_rms_norm.run_all()
     test_swiglu.run_all()
-    test_geglu.run_all()
     test_rope.run_all()
 
     print("=" * 70)

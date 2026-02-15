@@ -23,8 +23,9 @@ def main():
         from . import e2e
         e2e.run_all()
     else:
-        from . import run_all
-        run_all()
+        from . import kernel, e2e
+        kernel.run_all()
+        e2e.run_all()
 
 
 if __name__ == "__main__":

@@ -96,8 +96,8 @@ def setup_bastile():
     bastile.reset()
     applied = bastile.apply(
         rms_norm=True,
-        swiglu=False,
-        rope=False,
+        swiglu=True,
+        rope=True,
         fused_linear_cross_entropy=True,
     )
     return applied
