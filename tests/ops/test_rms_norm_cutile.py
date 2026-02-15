@@ -25,7 +25,7 @@ def pytorch_rms_norm(x, weight, eps):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_forward_correctness(hidden_size, dtype):
     """Forward output should match PyTorch reference."""
-    from bastile.ops.rms_norm_cutile import rms_norm
+    from bastile.ops.rms_norm import rms_norm
 
     batch_size, seq_len = 4, 128
     eps = 1e-6
@@ -43,7 +43,7 @@ def test_forward_correctness(hidden_size, dtype):
 
 def test_forward_2d_input():
     """Forward should handle 2D input (M, N) directly."""
-    from bastile.ops.rms_norm_cutile import rms_norm
+    from bastile.ops.rms_norm import rms_norm
 
     M, N = 256, 2048
     eps = 1e-6
@@ -59,7 +59,7 @@ def test_forward_2d_input():
 
 def test_forward_large_batch():
     """Forward should handle large batch sizes."""
-    from bastile.ops.rms_norm_cutile import rms_norm
+    from bastile.ops.rms_norm import rms_norm
 
     batch_size, seq_len, hidden_size = 32, 512, 2048
     eps = 1e-6
@@ -81,7 +81,7 @@ def test_forward_large_batch():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_backward_correctness(hidden_size, dtype):
     """Backward gradients should match PyTorch reference."""
-    from bastile.ops.rms_norm_cutile import rms_norm
+    from bastile.ops.rms_norm import rms_norm
 
     batch_size, seq_len = 2, 64
     eps = 1e-6
@@ -118,7 +118,7 @@ def test_backward_correctness(hidden_size, dtype):
 
 def test_backward_weight_gradient_accumulation():
     """Weight gradient should correctly accumulate across all rows."""
-    from bastile.ops.rms_norm_cutile import rms_norm
+    from bastile.ops.rms_norm import rms_norm
 
     hidden_size = 1024
     eps = 1e-6
@@ -144,7 +144,7 @@ def test_backward_weight_gradient_accumulation():
 
 def test_module_forward():
     """CuTileRMSNorm module should work as drop-in replacement."""
-    from bastile.ops.rms_norm_cutile import CuTileRMSNorm
+    from bastile.ops.rms_norm import CuTileRMSNorm
 
     hidden_size = 2048
     eps = 1e-6
@@ -160,7 +160,7 @@ def test_module_forward():
 
 def test_module_backward():
     """CuTileRMSNorm module backward should produce valid gradients."""
-    from bastile.ops.rms_norm_cutile import CuTileRMSNorm
+    from bastile.ops.rms_norm import CuTileRMSNorm
 
     hidden_size = 2048
     eps = 1e-6

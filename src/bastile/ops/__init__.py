@@ -8,7 +8,7 @@ Supported models:
 This module automatically registers all available patches when imported.
 """
 
-from . import rms_norm_cutile as rms_norm  # CuTile RMSNorm (autotuned gather/TMA)
+from . import rms_norm  # CuTile RMSNorm (persistent fwd + persistent bwd)
 from . import swiglu  # CuTile SwiGLU
 from . import rope  # CuTile RoPE
 
