@@ -26,5 +26,13 @@ bench-profile:
 bench-rmsnorm:
 	uv run python3 -u -m tests.benchmarks.kernel.rms_norm_quack_vs_cutile
 
+# GPT-OSS-20B seq length sweep: PyTorch vs Liger vs Bastile (parallel on 3 GPUs)
+bench-gpt-oss:
+	uv run python3 -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen
+
+# GPT-OSS-20B seq length sweep: PyTorch vs Liger vs Bastile (sequential, 1 GPU)
+bench-gpt-oss-seq:
+	uv run python3 -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen --sequential
+
 # Run all benchmarks
-bench-all: bench-small bench-8b
+bench-all: bench-small bench-8b bench-gpt-oss

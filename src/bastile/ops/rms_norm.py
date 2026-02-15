@@ -207,3 +207,14 @@ register_patch(
     priority=10,
     models=["qwen3"],
 )
+
+register_patch(
+    name="rms_norm_gpt_oss",
+    description="CuTile RMSNorm for GPT-OSS (persistent fwd + persistent bwd)",
+    target_module="transformers.models.gpt_oss.modeling_gpt_oss",
+    target_attr="GptOssRMSNorm",
+    replacement=CuTileRMSNorm,
+    has_backward=True,
+    priority=10,
+    models=["gpt_oss"],
+)

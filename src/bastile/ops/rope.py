@@ -818,3 +818,15 @@ register_patch(
     priority=10,
     models=["qwen3"],
 )
+
+# Register patches for GPT-OSS
+register_patch(
+    name="rope_gpt_oss",
+    description="CuTile RoPE with autotuning for GPT-OSS models",
+    target_module="transformers.models.gpt_oss.modeling_gpt_oss",
+    target_attr="apply_rotary_pos_emb",
+    replacement=apply_rotary_pos_emb,
+    has_backward=True,
+    priority=10,
+    models=["gpt_oss"],
+)

@@ -530,4 +530,78 @@ register_patch(
     has_backward=True,
     priority=10,
     models=["qwen3"],
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GPT-OSS Model forward patch (MoE variant)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def bastile_gpt_oss_lce_forward(
+    self,
+    input_ids=None, attention_mask=None, position_ids=None,
+    past_key_values=None, inputs_embeds=None, labels=None,
+    use_cache=None, output_router_logits=None,
+    cache_position=None, logits_to_keep=0, **kwargs,
+):
+    output_router_logits = (
+        output_router_logits if output_router_logits is not None
+        else self.config.output_router_logits
     )
+
+    outputs = self.model(
+        input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
+        past_key_values=past_key_values, inputs_embeds=inputs_embeds,
+        use_cache=use_cache, output_router_logits=output_router_logits,
+        cache_position=cache_position, **kwargs,
+    )
+
+    hidden_states = outputs.last_hidden_state
+    logits = None
+    loss = None
+
+    if self.training and labels is not None:
+        shift_hidden = hidden_states[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        loss = fused_linear_cross_entropy(
+            shift_hidden, self.lm_head.weight, shift_labels,
+            bias=getattr(self.lm_head, 'bias', None), ignore_index=-100,
+        )
+    else:
+        s = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, s, :])
+        if labels is not None:
+            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+
+    aux_loss = None
+    if output_router_logits:
+        from transformers.models.gpt_oss.modeling_gpt_oss import load_balancing_loss_func
+        aux_loss = load_balancing_loss_func(
+            outputs.router_logits,
+            self.num_experts,
+            self.num_experts_per_tok,
+            attention_mask,
+        )
+        if labels is not None and loss is not None:
+            loss = loss + self.router_aux_loss_coef * aux_loss.to(loss.device)
+
+    from transformers.modeling_outputs import MoeCausalLMOutputWithPast
+    return MoeCausalLMOutputWithPast(
+        loss=loss, aux_loss=aux_loss, logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        router_logits=outputs.router_logits,
+    )
+
+
+register_patch(
+    name="fused_linear_cross_entropy_gpt_oss",
+    description="Fused Linear Cross-Entropy for GPT-OSS (MoE)",
+    target_module="transformers.models.gpt_oss.modeling_gpt_oss",
+    target_attr="GptOssForCausalLM.forward",
+    replacement=bastile_gpt_oss_lce_forward,
+    has_backward=True,
+    priority=10,
+    models=["gpt_oss"],
+)
