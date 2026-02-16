@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    { name = "Aghilan", email = "aghilan@example.com" }
+    { name = "Aghilan", email = "aghilann7@gmail.com" }
 ]
 keywords = ["pytorch", "cuda", "cutile", "optimization", "training", "finetuning"]
 classifiers = [

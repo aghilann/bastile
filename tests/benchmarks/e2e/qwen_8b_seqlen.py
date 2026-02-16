@@ -561,9 +561,9 @@ def plot_results(
     bastile_res = all_results.get("bastile", {})
 
     configs = [
-        ("PyTorch", pytorch, "#5B8FF9"),
-        ("Liger", liger, "#5AD8A6"),
-        ("Bastile", bastile_res, "#F6BD16"),
+        ("PyTorch", pytorch, "#EE4C2C"),
+        ("Liger", liger, "#0077B5"),
+        ("Bastile", bastile_res, "#5CE97E"),
     ]
 
     # Collect seq_lens that have at least one result
