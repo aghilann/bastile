@@ -7,17 +7,16 @@ Structure:
 - utils.py : Shared utilities for benchmarking
 """
 
-from . import kernel
-from . import e2e
+from . import e2e, kernel
 from .utils import (
+    E2EBenchmarkResult,
+    KernelBenchmarkResult,
+    Timer,
     benchmark_fn,
     benchmark_fn_with_stats,
+    clear_cuda_state,
     get_gpu_info,
     get_peak_bandwidth,
-    clear_cuda_state,
-    Timer,
-    KernelBenchmarkResult,
-    E2EBenchmarkResult,
 )
 
 
@@ -36,27 +35,27 @@ def run_all():
     print("=" * 80)
     print("Bastile Complete Benchmark Suite")
     print("=" * 80)
-    
+
     run_all_kernel_benchmarks()
     run_all_e2e_benchmarks()
-    
+
     print("\n" + "=" * 80)
     print("All benchmarks complete!")
     print("=" * 80)
 
 
 __all__ = [
-    "kernel",
-    "e2e",
+    "E2EBenchmarkResult",
+    "KernelBenchmarkResult",
+    "Timer",
     "benchmark_fn",
     "benchmark_fn_with_stats",
+    "clear_cuda_state",
+    "e2e",
     "get_gpu_info",
     "get_peak_bandwidth",
-    "clear_cuda_state",
-    "Timer",
-    "KernelBenchmarkResult",
-    "E2EBenchmarkResult",
-    "run_all_kernel_benchmarks",
-    "run_all_e2e_benchmarks",
+    "kernel",
     "run_all",
+    "run_all_e2e_benchmarks",
+    "run_all_kernel_benchmarks",
 ]

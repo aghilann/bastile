@@ -4,19 +4,19 @@ RMSNorm Kernel Benchmark.
 Compares CuTile RMSNorm vs Liger Kernel vs PyTorch reference.
 """
 
-import torch
 from dataclasses import dataclass
-from typing import List, Tuple
+
+import torch
 
 from ..utils import (
     benchmark_fn,
     clear_cuda_state,
-    get_peak_bandwidth,
-    compute_throughput_gbps,
     compute_bandwidth_utilization,
-    print_header,
-    print_gpu_info,
+    compute_throughput_gbps,
     format_speedup,
+    get_peak_bandwidth,
+    print_gpu_info,
+    print_header,
 )
 
 
@@ -28,7 +28,7 @@ class RMSNormConfig:
     dtype: torch.dtype
 
     @property
-    def shape(self) -> Tuple[int, int, int]:
+    def shape(self) -> tuple[int, int, int]:
         return (self.batch_size, self.seq_len, self.hidden_size)
 
     @property
@@ -44,7 +44,7 @@ class RMSNormConfig:
         return 2 * self.total_elements * self.element_size
 
     def __str__(self) -> str:
-        dtype_str = str(self.dtype).split('.')[-1]
+        dtype_str = str(self.dtype).split(".")[-1]
         return f"({self.batch_size}, {self.seq_len}, {self.hidden_size}) {dtype_str}"
 
 
@@ -111,10 +111,14 @@ def jit_warmup(cutile_rms_norm, liger_rms_norm):
     print("JIT compilation complete.\n")
 
 
-def run_benchmark_section(title: str, configs: List[RMSNormConfig], cutile_rms_norm, liger_rms_norm, peak_bw: float) -> List[dict]:
+def run_benchmark_section(
+    title: str, configs: list[RMSNormConfig], cutile_rms_norm, liger_rms_norm, peak_bw: float
+) -> list[dict]:
     """Run benchmarks for a section of configs."""
     print_header(title, 115)
-    print(f"{'Config':<40} {'Provider':<10} {'Latency':>10} {'Thruput':>10} {'BW%':>6} {'vs PyTorch':>12} {'vs Liger':>10}")
+    print(
+        f"{'Config':<40} {'Provider':<10} {'Latency':>10} {'Thruput':>10} {'BW%':>6} {'vs PyTorch':>12} {'vs Liger':>10}"
+    )
     print("-" * 115)
 
     results = []
@@ -128,26 +132,33 @@ def run_benchmark_section(title: str, configs: List[RMSNormConfig], cutile_rms_n
             ct = result["cutile"]
 
             # Print PyTorch
-            print(f"{str(config):<40} {'PyTorch':<10} {py['latency']:>8.1f}us {py['throughput']:>8.1f}GB/s {py['util']:>5.1f}%")
+            print(
+                f"{config!s:<40} {'PyTorch':<10} {py['latency']:>8.1f}us {py['throughput']:>8.1f}GB/s {py['util']:>5.1f}%"
+            )
 
             # Print Liger
-            speedup_vs_py = py['latency'] / lg['latency']
-            print(f"{'':<40} {'Liger':<10} {lg['latency']:>8.1f}us {lg['throughput']:>8.1f}GB/s {lg['util']:>5.1f}% {format_speedup(speedup_vs_py):>12}")
+            speedup_vs_py = py["latency"] / lg["latency"]
+            print(
+                f"{'':<40} {'Liger':<10} {lg['latency']:>8.1f}us {lg['throughput']:>8.1f}GB/s {lg['util']:>5.1f}% {format_speedup(speedup_vs_py):>12}"
+            )
 
             # Print CuTile
-            speedup_vs_py = py['latency'] / ct['latency']
-            speedup_vs_lg = lg['latency'] / ct['latency']
-            print(f"{'':<40} {'CuTile':<10} {ct['latency']:>8.1f}us {ct['throughput']:>8.1f}GB/s {ct['util']:>5.1f}% {format_speedup(speedup_vs_py):>12} {format_speedup(speedup_vs_lg):>10}")
+            speedup_vs_py = py["latency"] / ct["latency"]
+            speedup_vs_lg = lg["latency"] / ct["latency"]
+            print(
+                f"{'':<40} {'CuTile':<10} {ct['latency']:>8.1f}us {ct['throughput']:>8.1f}GB/s {ct['util']:>5.1f}% {format_speedup(speedup_vs_py):>12} {format_speedup(speedup_vs_lg):>10}"
+            )
             print()
         except Exception as e:
-            print(f"{str(config):<40} ERROR: {e}\n")
+            print(f"{config!s:<40} ERROR: {e}\n")
 
     return results
 
 
 def main():
-    from bastile.ops.rms_norm import rms_norm as cutile_rms_norm
     from liger_kernel.ops import LigerRMSNormFunction
+
+    from bastile.ops.rms_norm import rms_norm as cutile_rms_norm
 
     def liger_rms_norm(x, w, eps):
         return LigerRMSNormFunction.apply(x, w, eps)
@@ -171,7 +182,9 @@ def main():
         RMSNormConfig(32, 512, 2048, torch.float16),
         RMSNormConfig(32, 512, 4096, torch.float16),
     ]
-    all_results.extend(run_benchmark_section("FLOAT16 BENCHMARKS", fp16_configs, cutile_rms_norm, liger_rms_norm, peak_bw))
+    all_results.extend(
+        run_benchmark_section("FLOAT16 BENCHMARKS", fp16_configs, cutile_rms_norm, liger_rms_norm, peak_bw)
+    )
 
     # Section 2: BFloat16
     bf16_configs = [
@@ -181,7 +194,9 @@ def main():
         RMSNormConfig(32, 512, 4096, torch.bfloat16),
         RMSNormConfig(64, 512, 4096, torch.bfloat16),
     ]
-    all_results.extend(run_benchmark_section("BFLOAT16 BENCHMARKS", bf16_configs, cutile_rms_norm, liger_rms_norm, peak_bw))
+    all_results.extend(
+        run_benchmark_section("BFLOAT16 BENCHMARKS", bf16_configs, cutile_rms_norm, liger_rms_norm, peak_bw)
+    )
 
     # Section 3: Float32
     fp32_configs = [
@@ -190,7 +205,9 @@ def main():
         RMSNormConfig(32, 512, 2048, torch.float32),
         RMSNormConfig(32, 512, 4096, torch.float32),
     ]
-    all_results.extend(run_benchmark_section("FLOAT32 BENCHMARKS", fp32_configs, cutile_rms_norm, liger_rms_norm, peak_bw))
+    all_results.extend(
+        run_benchmark_section("FLOAT32 BENCHMARKS", fp32_configs, cutile_rms_norm, liger_rms_norm, peak_bw)
+    )
 
     # Summary
     print_header("SUMMARY", 115)
@@ -200,7 +217,7 @@ def main():
         cutile_vs_liger = []
         liger_vs_pytorch = []
 
-        for (config, result) in all_results:
+        for config, result in all_results:
             py = result["pytorch"]["latency"]
             ct = result["cutile"]["latency"]
             lg = result["liger"]["latency"]
@@ -208,18 +225,18 @@ def main():
             cutile_vs_liger.append(lg / ct)
             liger_vs_pytorch.append(py / lg)
 
-        print(f"\nCuTile vs PyTorch:")
-        print(f"  Average Speedup: {sum(cutile_vs_pytorch)/len(cutile_vs_pytorch):.2f}x")
+        print("\nCuTile vs PyTorch:")
+        print(f"  Average Speedup: {sum(cutile_vs_pytorch) / len(cutile_vs_pytorch):.2f}x")
         print(f"  Max Speedup:     {max(cutile_vs_pytorch):.2f}x")
         print(f"  Min Speedup:     {min(cutile_vs_pytorch):.2f}x")
 
-        print(f"\nLiger vs PyTorch:")
-        print(f"  Average Speedup: {sum(liger_vs_pytorch)/len(liger_vs_pytorch):.2f}x")
+        print("\nLiger vs PyTorch:")
+        print(f"  Average Speedup: {sum(liger_vs_pytorch) / len(liger_vs_pytorch):.2f}x")
         print(f"  Max Speedup:     {max(liger_vs_pytorch):.2f}x")
         print(f"  Min Speedup:     {min(liger_vs_pytorch):.2f}x")
 
-        print(f"\nCuTile vs Liger:")
-        print(f"  Average Speedup: {sum(cutile_vs_liger)/len(cutile_vs_liger):.2f}x")
+        print("\nCuTile vs Liger:")
+        print(f"  Average Speedup: {sum(cutile_vs_liger) / len(cutile_vs_liger):.2f}x")
         print(f"  Max Speedup:     {max(cutile_vs_liger):.2f}x")
         print(f"  Min Speedup:     {min(cutile_vs_liger):.2f}x")
 

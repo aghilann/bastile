@@ -1,197 +1,21 @@
-"""
-Autotuning infrastructure for Bastile kernels.
+"""Kernel warmup and cache management for Bastile."""
 
-Provides caching and configuration selection for optimal kernel parameters.
-Supports disk-based persistent caching to avoid re-tuning across sessions.
-"""
-
-import json
-import threading
-from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import torch
-
-T = TypeVar("T")
-
-_autotune_cache: Dict[str, Any] = {}
-_cache_lock = threading.Lock()
 
 _CACHE_DIR = Path.home() / ".cache" / "bastile"
 
 
-@dataclass
-class CacheEntry:
-    """Cache entry for autotuned config."""
-    config: Any
-    time_ms: Optional[float] = None
-
-
-def _get_disk_cache_path() -> Path:
-    """Get path to disk cache file."""
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0).replace(" ", "_")
-        return _CACHE_DIR / f"autotune_cache_{gpu_name}.json"
-    return _CACHE_DIR / "autotune_cache.json"
-
-
-def _load_disk_cache() -> Dict[str, Any]:
-    """Load cache from disk."""
-    cache_path = _get_disk_cache_path()
-    if cache_path.exists():
-        try:
-            with open(cache_path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
-    return {}
-
-
-def _save_disk_cache(cache: Dict[str, Any]):
-    """Save cache to disk."""
-    cache_path = _get_disk_cache_path()
-    try:
-        with open(cache_path, "w") as f:
-            json.dump(cache, f, indent=2)
-    except IOError:
-        pass
-
-
-def _time_ms(run_once: Callable, *, warmup: int = 3, rep: int = 5) -> float:
-    """Time a function in milliseconds with proper warmup."""
-    stream = torch.cuda.current_stream()
-    stream.synchronize()
-
-    for _ in range(warmup):
-        run_once()
-
-    stream.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-
-    start.record(stream)
-    for _ in range(rep):
-        run_once()
-    end.record(stream)
-    end.synchronize()
-
-    return start.elapsed_time(end) / max(1, rep)
-
-
 def clear_cache():
-    """Clear both memory and disk autotuning caches."""
-    global _autotune_cache
-    with _cache_lock:
-        _autotune_cache.clear()
-    cache_path = _get_disk_cache_path()
-    if cache_path.exists():
+    """Clear disk-based kernel caches."""
+    if not _CACHE_DIR.exists():
+        return
+    for f in _CACHE_DIR.glob("*.json"):
         try:
-            cache_path.unlink()
-        except IOError:
+            f.unlink()
+        except OSError:
             pass
-
-
-def autotune(
-    run_fn: Callable[[Any], None],
-    search_space: List[Any],
-    key: str,
-    *,
-    kernel_name: str = "",
-    max_iter: int = 10,
-    warmup: int = 2,
-    rep: int = 3,
-    use_heuristic: bool = True,
-    persist_to_disk: bool = True,
-) -> Any:
-    """
-    Autotune a kernel by selecting the best config from the search space.
-
-    Args:
-        run_fn: Function that runs the kernel with a given config
-        search_space: List of configs to try
-        key: Cache key for this configuration
-        kernel_name: Name of kernel (for disk cache organization)
-        max_iter: Maximum configs to try (for large search spaces)
-        warmup: Warmup iterations per config
-        rep: Repetitions for timing
-        use_heuristic: If True, pick middle config without timing (faster startup)
-        persist_to_disk: If True, save results to disk cache
-
-    Returns:
-        Best config from the search space
-    """
-    global _autotune_cache
-
-    full_key = f"{kernel_name}:{key}" if kernel_name else key
-
-    if hasattr(search_space, '__iter__') and not hasattr(search_space, '__len__'):
-        search_space = list(search_space)
-
-    with _cache_lock:
-        if full_key in _autotune_cache:
-            return _autotune_cache[full_key].config
-
-    if persist_to_disk:
-        disk_cache = _load_disk_cache()
-        if full_key in disk_cache:
-            config = disk_cache[full_key]
-            if isinstance(config, dict) and search_space:
-                template = search_space[0]
-                if hasattr(template, '__dataclass_fields__'):
-                    try:
-                        config = type(template)(**config)
-                    except (TypeError, ValueError):
-                        pass
-            with _cache_lock:
-                _autotune_cache[full_key] = CacheEntry(config=config)
-            return config
-
-    if not search_space:
-        raise ValueError("Empty search space")
-
-    if use_heuristic:
-        best_config = search_space[len(search_space) // 2]
-        with _cache_lock:
-            _autotune_cache[full_key] = CacheEntry(config=best_config)
-
-        if persist_to_disk:
-            disk_cache = _load_disk_cache()
-            if hasattr(best_config, '__dict__'):
-                disk_cache[full_key] = asdict(best_config) if hasattr(best_config, '__dataclass_fields__') else best_config.__dict__
-            else:
-                disk_cache[full_key] = best_config
-            _save_disk_cache(disk_cache)
-
-        return best_config
-
-    best_config = search_space[0]
-    best_time = float("inf")
-
-    configs_to_try = search_space[:max_iter] if len(search_space) > max_iter else search_space
-
-    for config in configs_to_try:
-        try:
-            time_ms = _time_ms(lambda: run_fn(config), warmup=warmup, rep=rep)
-            if time_ms < best_time:
-                best_time = time_ms
-                best_config = config
-        except Exception:
-            continue
-
-    with _cache_lock:
-        _autotune_cache[full_key] = CacheEntry(config=best_config, time_ms=best_time)
-
-    if persist_to_disk:
-        disk_cache = _load_disk_cache()
-        if hasattr(best_config, '__dict__'):
-            disk_cache[full_key] = asdict(best_config) if hasattr(best_config, '__dataclass_fields__') else best_config.__dict__
-        else:
-            disk_cache[full_key] = best_config
-        _save_disk_cache(disk_cache)
-
-    return best_config
 
 
 def warmup_all_kernels(
@@ -231,4 +55,5 @@ def warmup_all_kernels(
 
     except Exception as e:
         import logging
+
         logging.debug(f"Warmup skipped: {e}")

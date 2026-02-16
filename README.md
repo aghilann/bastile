@@ -60,7 +60,7 @@ Selective patching:
 bastile.apply(
     rms_norm=True,                   # CuTile RMSNorm
     swiglu=True,                     # CuTile SwiGLU MLP
-    rope=True,                       # CuTile RoPE with autotuning
+    rope=True,                       # CuTile RoPE
     fused_linear_cross_entropy=True,  # CuTile fused linear + CE
 )
 ```
@@ -100,7 +100,7 @@ src/bastile/ops/swiglu.py → patches Qwen3MLP
 
 ### RoPE — CuTile
 
-CuTile rotary position embedding with occupancy-based autotuning (tests occupancy 1, 2, 4, 8 and caches the best). In-place rotation on reshaped tensors to minimize memory traffic.
+CuTile rotary position embedding with compiler-optimized occupancy. In-place rotation on reshaped tensors to minimize memory traffic. Backward reuses the forward kernel by negating sin (inverse rotation identity).
 
 ```
 src/bastile/ops/rope.py → patches apply_rotary_pos_emb
@@ -124,7 +124,7 @@ bastile.apply(rope=False)        # Patch everything except RoPE
 bastile.reset()                  # Restore original implementations
 bastile.get_patched_ops()        # List currently active patches
 bastile.warmup_all_kernels()     # Pre-compile kernels (avoids JIT lag)
-bastile.clear_autotune_cache()   # Re-run autotuning on next call
+bastile.clear_autotune_cache()   # Clear kernel caches
 ```
 
 ## Running Benchmarks

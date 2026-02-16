@@ -1,7 +1,7 @@
 # export LD_LIBRARY_PATH := /usr/local/cuda-13.0/compat:/usr/lib/x86_64-linux-gnu:$(LD_LIBRARY_PATH)
 export CUDA_VISIBLE_DEVICES ?= 2
 
-.PHONY: bench-8b bench-8b-seq bench-fsdp bench-rmsnorm bench-lce bench-all test
+.PHONY: bench-8b bench-8b-seq bench-fsdp bench-rmsnorm bench-lce bench-all test lint fmt
 
 # Qwen3-8B seq length sweep: PyTorch vs Liger vs Bastile (parallel on 3 GPUs)
 bench-8b:
@@ -29,3 +29,11 @@ bench-all: bench-8b bench-fsdp
 # Run ops unit tests
 test:
 	uv run python3 -m tests.ops.run_all
+
+# Lint and format
+lint:
+	uv run ruff check src tests
+
+fmt:
+	uv run ruff format src tests
+	uv run ruff check --fix src tests

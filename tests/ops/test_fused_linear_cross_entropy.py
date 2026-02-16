@@ -46,8 +46,9 @@ def test_forward_loss_bf16():
     weight = torch.randn(V, H, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     target = torch.randint(0, V, (BT,), device="cuda")
 
-    loss_ref = _pytorch_reference(x.detach().float().requires_grad_(True),
-                                  weight.detach().float().requires_grad_(True), target)
+    loss_ref = _pytorch_reference(
+        x.detach().float().requires_grad_(True), weight.detach().float().requires_grad_(True), target
+    )
     loss_cutile = fused_linear_cross_entropy(x, weight, target)
 
     torch.testing.assert_close(loss_cutile.float(), loss_ref, rtol=5e-2, atol=5e-2)
@@ -101,8 +102,10 @@ def test_ignore_index():
     target[::3] = -100  # Mark every 3rd token as ignored
 
     loss_ref = _pytorch_reference(
-        x.detach().requires_grad_(True), weight.detach().requires_grad_(True),
-        target, ignore_index=-100,
+        x.detach().requires_grad_(True),
+        weight.detach().requires_grad_(True),
+        target,
+        ignore_index=-100,
     )
     loss_ct = fused_linear_cross_entropy(x, weight, target, ignore_index=-100)
 
@@ -146,7 +149,9 @@ def test_v_chunked_mode():
     target = torch.randint(0, V, (BT,), device="cuda")
 
     loss_ref = _pytorch_reference(
-        x.detach().requires_grad_(True), weight.detach().requires_grad_(True), target,
+        x.detach().requires_grad_(True),
+        weight.detach().requires_grad_(True),
+        target,
     )
     loss_ct = fused_linear_cross_entropy(x, weight, target, v_chunk_size=128)
 

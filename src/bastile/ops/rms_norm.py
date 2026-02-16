@@ -1,11 +1,11 @@
 """CuTile RMSNorm — persistent kernels for forward and backward."""
 
+import cuda.tile as ct
 import torch
 import torch.nn as nn
-import cuda.tile as ct
 
 from ..registry import register_patch
-from .utils import next_power_of_2, get_sm_count
+from .utils import get_sm_count, next_power_of_2
 
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
@@ -62,8 +62,7 @@ def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ConstInt, TILE_N: Cons
         xhat = xt * r
         wdy = dyt * w
         c = ct.sum(xhat * wdy, axis=1, keepdims=True) * rcp
-        ct.store(dx, index=(i, 0), tile=ct.astype((wdy - xhat * c) * r, dx.dtype),
-                 allow_tma=False, latency=3)
+        ct.store(dx, index=(i, 0), tile=ct.astype((wdy - xhat * c) * r, dx.dtype), allow_tma=False, latency=3)
         dw_acc = dw_acc + ct.sum(dyt * xhat, axis=0, keepdims=True)
 
     ct.store(dw_partial, index=(bid, 0), tile=dw_acc, allow_tma=False)
@@ -76,7 +75,7 @@ _bwd_cfg: dict = {}  # (M, N) -> (tile_m, tile_n, grid, N)
 def _fwd_tiles(M, N):
     sms = get_sm_count()
     T = next_power_of_2(N)
-    if M <= sms * 4:
+    if sms * 4 >= M:
         return (1, T, min(sms, M))
     if T <= 1024:
         tm = 16
@@ -149,7 +148,7 @@ class CuTileRMSNormFunction(torch.autograd.Function):
         ct.launch(stream, (g,), _rms_bwd, (dx, dy2, x2, weight, rstd, dwp, tm, T))
 
         dw = dwp.sum(0)
-        if T != No:
+        if No != T:
             dw = dw[:No]
         return dx.view(shape), dw.to(weight.dtype), None
 

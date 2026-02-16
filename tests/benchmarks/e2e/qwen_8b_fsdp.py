@@ -6,23 +6,25 @@ Launch:
     torchrun --nproc_per_node=8 -m tests.benchmarks.e2e.qwen_8b_fsdp
 """
 
-import os
 import gc
-import time
 import importlib
+import os
+import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional, Callable, List, Dict
+from functools import partial
 
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
-    ShardingStrategy,
+)
+from torch.distributed.fsdp import (
     MixedPrecision,
+    ShardingStrategy,
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from functools import partial
 
 MODEL_ID = "Qwen/Qwen3-8B"
 BATCH_SIZE_PER_GPU = 4
@@ -72,11 +74,13 @@ def reset_environment():
     clear_cuda_state()
     reset_peak_memory()
     import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
+
     importlib.reload(qwen3_mod)
 
 
 def get_fsdp_wrap_policy():
     from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
+
     return partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls={Qwen3DecoderLayer},
@@ -93,6 +97,7 @@ def get_mixed_precision():
 
 def setup_bastile():
     import bastile
+
     bastile.reset()
     applied = bastile.apply(
         rms_norm=True,
@@ -105,6 +110,7 @@ def setup_bastile():
 
 def setup_liger():
     from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+
     apply_liger_kernel_to_qwen3(
         rope=True,
         rms_norm=True,
@@ -116,13 +122,12 @@ def setup_liger():
 
 def run_benchmark(
     name: str,
-    setup_fn: Optional[Callable] = None,
+    setup_fn: Callable | None = None,
     batch_size: int = BATCH_SIZE_PER_GPU,
     seq_len: int = SEQ_LEN,
     warmup_iters: int = WARMUP_ITERS,
     duration_sec: float = DURATION_SEC,
-) -> Optional[FSDPBenchmarkResult]:
-    rank = dist.get_rank()
+) -> FSDPBenchmarkResult | None:
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
@@ -165,8 +170,10 @@ def run_benchmark(
 
     global_batch = batch_size * world_size
     tokens_per_iter = global_batch * seq_len
-    rank0_print(f"  Batch: {batch_size}/GPU x {world_size} GPUs = {global_batch} global, "
-                f"seq_len={seq_len}, {tokens_per_iter} tokens/iter")
+    rank0_print(
+        f"  Batch: {batch_size}/GPU x {world_size} GPUs = {global_batch} global, "
+        f"seq_len={seq_len}, {tokens_per_iter} tokens/iter"
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     input_ids = torch.randint(0, 151936, (batch_size, seq_len), device=device)
@@ -181,7 +188,7 @@ def run_benchmark(
             outputs.loss.backward()
             optimizer.step()
     except torch.cuda.OutOfMemoryError:
-        rank0_print(f"  OOM during warmup — skipping")
+        rank0_print("  OOM during warmup — skipping")
         del model, optimizer
         clear_cuda_state()
         dist.barrier()
@@ -244,8 +251,10 @@ def run_benchmark(
         final_loss=losses[-1],
     )
 
-    rank0_print(f"  Complete: {result.iterations} iters, {result.tokens_per_sec:,.0f} tok/s, "
-                f"{result.avg_iter_ms:.1f} ms/iter, {result.peak_memory_gb:.2f} GB/GPU")
+    rank0_print(
+        f"  Complete: {result.iterations} iters, {result.tokens_per_sec:,.0f} tok/s, "
+        f"{result.avg_iter_ms:.1f} ms/iter, {result.peak_memory_gb:.2f} GB/GPU"
+    )
 
     del model, optimizer
     clear_cuda_state()
@@ -267,17 +276,18 @@ def main():
     rank0_print("=" * 100)
     rank0_print(f"\n  Model: {MODEL_ID} (pretrained)")
     rank0_print(f"  GPUs: {world_size}x {torch.cuda.get_device_name(local_rank)}")
-    rank0_print(f"  FSDP: FULL_SHARD, BFloat16MixedPrecision")
+    rank0_print("  FSDP: FULL_SHARD, BFloat16MixedPrecision")
     rank0_print(f"  Batch: {BATCH_SIZE_PER_GPU}/GPU x {world_size} = {BATCH_SIZE_PER_GPU * world_size} global")
     rank0_print(f"  Seq len: {SEQ_LEN}, Warmup: {WARMUP_ITERS}, Duration: {DURATION_SEC}s per config")
     rank0_print()
 
-    results: Dict[str, Optional[FSDPBenchmarkResult]] = {}
+    results: dict[str, FSDPBenchmarkResult | None] = {}
 
     # 1. Bastile
     print_header("Benchmark: Bastile")
     results["Bastile"] = run_benchmark("Bastile", setup_fn=setup_bastile)
     import bastile
+
     bastile.reset()
     dist.barrier()
 
@@ -306,8 +316,7 @@ def main():
         print_header("RESULTS")
         configs = ["PyTorch", "Liger", "Bastile"]
 
-        print(f"\n  {'Config':<15} {'Tokens/sec':>14} {'Speedup':>10} {'ms/iter':>12} "
-              f"{'Mem/GPU':>10} {'Loss':>12}")
+        print(f"\n  {'Config':<15} {'Tokens/sec':>14} {'Speedup':>10} {'ms/iter':>12} {'Mem/GPU':>10} {'Loss':>12}")
         print(f"  {'-' * 80}")
 
         baseline = results.get("PyTorch")
@@ -317,8 +326,10 @@ def main():
                 print(f"  {c:<15} {'FAILED':>14}")
                 continue
             speedup = r.tokens_per_sec / baseline.tokens_per_sec if baseline else 0
-            print(f"  {c:<15} {r.tokens_per_sec:>12,.0f}   {speedup:>8.2f}x {r.avg_iter_ms:>10.1f}ms "
-                  f"{r.peak_memory_gb:>8.2f}GB {r.final_loss:>12.4f}")
+            print(
+                f"  {c:<15} {r.tokens_per_sec:>12,.0f}   {speedup:>8.2f}x {r.avg_iter_ms:>10.1f}ms "
+                f"{r.peak_memory_gb:>8.2f}GB {r.final_loss:>12.4f}"
+            )
 
         print_header("SUMMARY")
         b = results.get("Bastile")
@@ -326,8 +337,7 @@ def main():
         p = results.get("PyTorch")
 
         if p:
-            print(f"\n  Baseline: PyTorch ({p.tokens_per_sec:,.0f} tok/s, "
-                  f"{p.peak_memory_gb:.2f} GB/GPU)")
+            print(f"\n  Baseline: PyTorch ({p.tokens_per_sec:,.0f} tok/s, {p.peak_memory_gb:.2f} GB/GPU)")
         if b and p:
             speedup = (b.tokens_per_sec / p.tokens_per_sec - 1) * 100
             mem_diff = b.peak_memory_gb - p.peak_memory_gb

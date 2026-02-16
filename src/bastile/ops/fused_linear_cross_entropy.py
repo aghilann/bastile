@@ -24,7 +24,7 @@ import cuda.tile as ct
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch.amp import custom_fwd, custom_bwd
+from torch.amp import custom_bwd, custom_fwd
 
 from .utils import get_sm_count
 
@@ -43,12 +43,11 @@ _ALIGN = 8  # GEMM alignment
 # Saves one full read+write vs F.log_softmax (alloc) + torch.exp (write).
 # Target fixup (dlogits[target] -= 1) is fused into pass 2.
 # ═══════════════════════════════════════════════════════════════════════════
-
 @ct.kernel(occupancy=4)
 def _ce_online_kernel(
-    logits,          # (M, V) bf16 — overwritten with softmax probs
-    loss_out,        # (M,) float32
-    target_logits,   # (M,) float32 — pre-extracted logits[row, target]
+    logits,  # (M, V) bf16 — overwritten with softmax probs
+    loss_out,  # (M,) float32
+    target_logits,  # (M,) float32 — pre-extracted logits[row, target]
     n_rows: ConstInt,
     V: ConstInt,
     TILE_V: ConstInt,
@@ -72,8 +71,7 @@ def _ce_online_kernel(
 
         for c in range(num_chunks):
             cols = ct.add(ct.full((TILE_V,), c * TILE_V, dtype=ct.int32), col_base)
-            chunk = ct.gather(logits, (row, cols),
-                              check_bounds=True, padding_value=-1e30)
+            chunk = ct.gather(logits, (row, cols), check_bounds=True, padding_value=-1e30)
             chunk_f32 = ct.astype(chunk, ct.float32)
 
             # Online update: track (max, sum_exp) jointly
@@ -86,8 +84,7 @@ def _ce_online_kernel(
 
         # ── Loss = log(sum_exp) + max − target_logit ──
         lse = ct.add(row_max, ct.log(sum_exp))
-        tgt_logit = ct.load(target_logits, index=(row,), shape=(1,),
-                            padding_mode=ct.PaddingMode.ZERO)
+        tgt_logit = ct.load(target_logits, index=(row,), shape=(1,), padding_mode=ct.PaddingMode.ZERO)
         tgt_logit = ct.astype(tgt_logit, ct.float32)
         loss = ct.sub(ct.reshape(lse, (1,)), tgt_logit)
         ct.store(loss_out, index=(row,), tile=loss, allow_tma=False)
@@ -97,16 +94,13 @@ def _ce_online_kernel(
 
         for c in range(num_chunks):
             cols = ct.add(ct.full((TILE_V,), c * TILE_V, dtype=ct.int32), col_base)
-            chunk = ct.gather(logits, (row, cols),
-                              check_bounds=True, padding_value=-1e30)
+            chunk = ct.gather(logits, (row, cols), check_bounds=True, padding_value=-1e30)
             chunk_f32 = ct.astype(chunk, ct.float32)
             probs = ct.mul(ct.exp(ct.sub(chunk_f32, row_max)), inv_sum)
-            ct.scatter(logits, (row, cols),
-                       ct.astype(probs, logits.dtype), check_bounds=True)
+            ct.scatter(logits, (row, cols), ct.astype(probs, logits.dtype), check_bounds=True)
 
 
-def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor,
-               loss_chunk: Tensor, ignore_index: int):
+def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor, loss_chunk: Tensor, ignore_index: int):
     """CuTile online-softmax CE: kernel computes loss + probs, Python does fixup."""
     M, V = logits_chunk.shape
     device = logits_chunk.device
@@ -123,7 +117,9 @@ def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor,
     sms = get_sm_count()
     grid = (min(sms * 4, M),)
     ct.launch(
-        torch.cuda.current_stream(), grid, _ce_online_kernel,
+        torch.cuda.current_stream(),
+        grid,
+        _ce_online_kernel,
         (logits_chunk, loss_chunk, target_logits, M, V, TILE_V),
     )
 
@@ -137,10 +133,12 @@ def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor,
 # ═══════════════════════════════════════════════════════════════════════════
 # BT-chunked forward  (default — fast path)
 # ═══════════════════════════════════════════════════════════════════════════
-
 def _chunked_fwd(
-    x: Tensor, weight: Tensor, target: Tensor,
-    chunk_size: int, ignore_index: int,
+    x: Tensor,
+    weight: Tensor,
+    target: Tensor,
+    chunk_size: int,
+    ignore_index: int,
 ):
     BT, H = x.shape
     V = weight.shape[0]
@@ -182,9 +180,9 @@ def _chunked_fwd(
         else:
             torch.mm(logits_chunk.t(), x_chunk, out=dw_mm_buf)
             if i == 0:
-                dw.copy_(dw_mm_buf)    # fp32 ← bf16, no temp
+                dw.copy_(dw_mm_buf)  # fp32 ← bf16, no temp
             else:
-                dw.add_(dw_mm_buf)     # fp32 += bf16, in-place, no temp
+                dw.add_(dw_mm_buf)  # fp32 += bf16, in-place, no temp
 
     return loss, dx, dw, last_dlogits, last_x_chunk
 
@@ -197,10 +195,13 @@ def _chunked_fwd(
 # Tip 2: Streaming log-sum-exp trick for online softmax.
 # Tip 3: Capture the target logit while iterating V tiles.
 # ═══════════════════════════════════════════════════════════════════════════
-
 def _v_chunked_fwd(
-    x: Tensor, weight: Tensor, target: Tensor,
-    bt_chunk: int, v_chunk: int, ignore_index: int,
+    x: Tensor,
+    weight: Tensor,
+    target: Tensor,
+    bt_chunk: int,
+    v_chunk: int,
+    ignore_index: int,
 ):
     """
     V-chunked: only (bt_chunk, v_chunk) logits materialised at a time.
@@ -224,10 +225,10 @@ def _v_chunked_fwd(
     for bi in range(bt_chunks):
         bs, be = bi * bt_chunk, min((bi + 1) * bt_chunk, BT)
         clen = be - bs
-        x_c = x[bs:be]                  # (clen, H)
-        tgt_c = target[bs:be]            # (clen,)
-        loss_c = loss[bs:be]             # (clen,)
-        dx_c = dx[bs:be]                 # (clen, H)
+        x_c = x[bs:be]  # (clen, H)
+        tgt_c = target[bs:be]  # (clen,)
+        loss_c = loss[bs:be]  # (clen,)
+        dx_c = dx[bs:be]  # (clen, H)
 
         # Per-row streaming softmax state
         row_max = torch.full((clen, 1), -1e30, device=device, dtype=torch.float32)
@@ -238,9 +239,9 @@ def _v_chunked_fwd(
         for vi in range(v_tiles):
             vs, ve = vi * v_chunk, min((vi + 1) * v_chunk, V)
             vlen = ve - vs
-            w_tile = weight[vs:ve]               # (vlen, H)
+            w_tile = weight[vs:ve]  # (vlen, H)
             lt = logits_buf[:clen, :vlen]
-            torch.mm(x_c, w_tile.mT, out=lt)     # small GEMM
+            torch.mm(x_c, w_tile.mT, out=lt)  # small GEMM
 
             # Online softmax update (PyTorch ops on small tiles — fast)
             lt_f32 = lt.float()
@@ -258,24 +259,24 @@ def _v_chunked_fwd(
                 target_logit[in_range] = lt_f32[rows_in, local_idx]
 
         # ── Loss ──
-        lse = (row_max.squeeze(-1) + sum_exp.squeeze(-1).log())
+        lse = row_max.squeeze(-1) + sum_exp.squeeze(-1).log()
         loss_c.copy_(lse - target_logit)
         ignored = tgt_c == ignore_index
         loss_c[ignored] = 0.0
 
         # ── Pass 2: Recompute logits → dlogits → accumulate dx, dw ──
-        inv_sum = 1.0 / sum_exp          # (clen, 1) float32
+        inv_sum = 1.0 / sum_exp  # (clen, 1) float32
 
         for vi in range(v_tiles):
             vs, ve = vi * v_chunk, min((vi + 1) * v_chunk, V)
             vlen = ve - vs
             w_tile = weight[vs:ve]
             lt = logits_buf[:clen, :vlen]
-            torch.mm(x_c, w_tile.mT, out=lt)     # recompute
+            torch.mm(x_c, w_tile.mT, out=lt)  # recompute
 
             # dlogits = softmax probs
             lt_f32 = lt.float()
-            probs = torch.exp(lt_f32 - row_max) * inv_sum   # (clen, vlen) fp32
+            probs = torch.exp(lt_f32 - row_max) * inv_sum  # (clen, vlen) fp32
 
             # Target fixup: probs[row, tgt_col] -= 1
             in_range = (tgt_c >= vs) & (tgt_c < ve)
@@ -286,7 +287,7 @@ def _v_chunked_fwd(
             probs[ignored] = 0.0
 
             # Convert to input dtype for GEMMs
-            dlogits = probs.to(x.dtype)           # (clen, vlen)
+            dlogits = probs.to(x.dtype)  # (clen, vlen)
 
             # dx += dlogits @ W_tile             (accumulate over V-tiles)
             dx_c.add_(torch.mm(dlogits, w_tile))
@@ -300,12 +301,10 @@ def _v_chunked_fwd(
 # ═══════════════════════════════════════════════════════════════════════════
 # Autograd Function
 # ═══════════════════════════════════════════════════════════════════════════
-
 class ChunkedLinearCrossEntropyFunction(torch.autograd.Function):
     @staticmethod
     @custom_fwd(device_type="cuda")
-    def forward(ctx, x, weight, target, ignore_index, reduction, chunk_size,
-                v_chunk_size):
+    def forward(ctx, x, weight, target, ignore_index, reduction, chunk_size, v_chunk_size):
         batch_shape = x.shape[:-1]
         x_flat = x.reshape(-1, x.shape[-1])
         BT = x_flat.shape[0]
@@ -318,9 +317,7 @@ class ChunkedLinearCrossEntropyFunction(torch.autograd.Function):
 
         if v_chunk_size is not None:
             # V-chunked (memory-efficient)
-            loss, dx, dw = _v_chunked_fwd(
-                x_flat, weight, target_flat, chunk_size, v_chunk_size, ignore_index
-            )
+            loss, dx, dw = _v_chunked_fwd(x_flat, weight, target_flat, chunk_size, v_chunk_size, ignore_index)
             last_dlogits = last_x_chunk = None
         else:
             # BT-chunked (fast, default)
@@ -334,20 +331,22 @@ class ChunkedLinearCrossEntropyFunction(torch.autograd.Function):
 
         loss_sum = loss.sum()
         n_valid = (target_flat[:BT] != ignore_index).sum().float()
-        loss_scale = None if reduction == "sum" else (
-            torch.tensor(1.0 / n_valid.item(), device=x.device, dtype=torch.float32)
-            if n_valid > 0 else torch.tensor(0.0, device=x.device, dtype=torch.float32)
+        loss_scale = (
+            None
+            if reduction == "sum"
+            else (
+                torch.tensor(1.0 / n_valid.item(), device=x.device, dtype=torch.float32)
+                if n_valid > 0
+                else torch.tensor(0.0, device=x.device, dtype=torch.float32)
+            )
         )
 
         # For V-chunked, dw is fully computed; for BT-chunked, last chunk deferred
         if v_chunk_size is not None:
             # dw is complete — scale it now
-            if loss_scale is not None:
-                scaled = loss_sum * loss_scale
-            else:
-                scaled = loss_sum
-            ctx.save_for_backward(dx, dw.to(weight.dtype),
-                                  loss_scale if loss_scale is not None else torch.tensor(0.0, device=x.device))
+            ctx.save_for_backward(
+                dx, dw.to(weight.dtype), loss_scale if loss_scale is not None else torch.tensor(0.0, device=x.device)
+            )
             ctx.batch_shape = batch_shape
             ctx.weight_dtype = weight.dtype
             ctx.v_chunked = True
@@ -403,7 +402,6 @@ class ChunkedLinearCrossEntropyFunction(torch.autograd.Function):
 # ═══════════════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════
-
 def fused_linear_cross_entropy(
     hidden_states: Tensor,
     weight: Tensor,
@@ -421,7 +419,7 @@ def fused_linear_cross_entropy(
                       Only (chunk_size, v_chunk_size) logits materialised.
     """
     if hidden_states.ndim == 3:
-        B, T, H = hidden_states.shape
+        _B, _T, H = hidden_states.shape
         hidden_states = hidden_states.view(-1, H)
         target = target.view(-1)
 
@@ -430,7 +428,12 @@ def fused_linear_cross_entropy(
         return F.cross_entropy(logits, target, ignore_index=ignore_index, reduction=reduction)
 
     return ChunkedLinearCrossEntropyFunction.apply(
-        hidden_states, weight, target, ignore_index, reduction, chunk_size,
+        hidden_states,
+        weight,
+        target,
+        ignore_index,
+        reduction,
+        chunk_size,
         v_chunk_size,
     )
 
@@ -438,13 +441,21 @@ def fused_linear_cross_entropy(
 # ═══════════════════════════════════════════════════════════════════════════
 # Model forward patch
 # ═══════════════════════════════════════════════════════════════════════════
-
 def bastile_lce_forward(
     self,
-    input_ids=None, attention_mask=None, position_ids=None,
-    past_key_values=None, inputs_embeds=None, labels=None,
-    use_cache=None, output_attentions=None, output_hidden_states=None,
-    cache_position=None, logits_to_keep=0, return_dict=None, **kwargs,
+    input_ids=None,
+    attention_mask=None,
+    position_ids=None,
+    past_key_values=None,
+    inputs_embeds=None,
+    labels=None,
+    use_cache=None,
+    output_attentions=None,
+    output_hidden_states=None,
+    cache_position=None,
+    logits_to_keep=0,
+    return_dict=None,
+    **kwargs,
 ):
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
     output_hidden_states = (
@@ -453,10 +464,15 @@ def bastile_lce_forward(
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
     outputs = self.model(
-        input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids,
-        past_key_values=past_key_values, inputs_embeds=inputs_embeds,
-        use_cache=use_cache, output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states, cache_position=cache_position,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        cache_position=cache_position,
         **kwargs,
     )
 
@@ -468,23 +484,27 @@ def bastile_lce_forward(
         shift_hidden = hidden_states[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         loss = fused_linear_cross_entropy(
-            shift_hidden, self.lm_head.weight, shift_labels,
-            bias=getattr(self.lm_head, 'bias', None), ignore_index=-100,
+            shift_hidden,
+            self.lm_head.weight,
+            shift_labels,
+            bias=getattr(self.lm_head, "bias", None),
+            ignore_index=-100,
         )
     else:
         s = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, s, :])
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels,
-                                     vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
     if not return_dict:
         output = (logits,) + outputs[1:]
         return ((loss,) + output) if loss is not None else output
 
     from transformers.modeling_outputs import CausalLMOutputWithPast
+
     return CausalLMOutputWithPast(
-        loss=loss, logits=logits,
+        loss=loss,
+        logits=logits,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
@@ -494,10 +514,11 @@ def bastile_lce_forward(
 # ═══════════════════════════════════════════════════════════════════════════
 # Warmup
 # ═══════════════════════════════════════════════════════════════════════════
-
 def warmup_fused_lce(
-    hidden_size: int = 4096, vocab_size: int = 151936,
-    dtype: torch.dtype = torch.bfloat16, device: str = "cuda",
+    hidden_size: int = 4096,
+    vocab_size: int = 151936,
+    dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
 ):
     """JIT-compile the CuTile CE kernel + warm cuBLAS caches."""
     x = torch.randn(8, hidden_size, dtype=dtype, device=device, requires_grad=True)

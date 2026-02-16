@@ -2,10 +2,7 @@
 Run all ops unit tests.
 """
 
-from . import test_rms_norm
-from . import test_swiglu
-from . import test_rope
-from . import test_fused_linear_cross_entropy
+from . import test_fused_linear_cross_entropy, test_rms_norm, test_rope, test_swiglu
 
 
 def run_all():

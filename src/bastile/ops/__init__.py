@@ -8,8 +8,10 @@ Supported models:
 This module automatically registers all available patches when imported.
 """
 
-from . import rms_norm  # CuTile RMSNorm (persistent fwd + persistent bwd)
-from . import swiglu    # CuTile SwiGLU
-from . import rope      # CuTile RoPE with autotuning
+from . import (
+    rms_norm,  # CuTile RMSNorm (persistent fwd + persistent bwd)
+    rope,  # CuTile RoPE
+    swiglu,  # CuTile SwiGLU
+)
 
-__all__ = ['rms_norm', 'swiglu', 'rope']
+__all__ = ["rms_norm", "rope", "swiglu"]

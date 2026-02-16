@@ -9,8 +9,8 @@ Benchmarks:
 """
 
 from .rms_norm import main as benchmark_rms_norm
-from .swiglu import main as benchmark_swiglu
 from .rope import main as benchmark_rope
+from .swiglu import main as benchmark_swiglu
 
 
 def run_all():
@@ -30,7 +30,7 @@ def run_all():
 
 __all__ = [
     "benchmark_rms_norm",
-    "benchmark_swiglu",
     "benchmark_rope",
+    "benchmark_swiglu",
     "run_all",
 ]
