@@ -1,8 +1,12 @@
 """
-Qwen3-8B Sequence Length Sweep: PyTorch vs Liger vs Bastile
+GPT-OSS-20B Sequence Length Sweep: PyTorch vs Liger vs Bastile
 
-Full Qwen3-8B architecture (no pretrained weights loaded) benchmarked
-across doubling sequence lengths.
+GPT-OSS-20B architecture (MoE, 128 experts) with reduced decoder layers
+to fit on a single GPU. All core dimensions preserved:
+  hidden_size=2880, intermediate_size=2880, head_dim=64,
+  num_attention_heads=64, num_key_value_heads=8,
+  num_local_experts=128, num_experts_per_tok=4, vocab_size=201088
+
 batch_size=1 to maximize sequence length headroom on the GPU.
 
 Each configuration (PyTorch, Liger, Bastile) runs as a separate subprocess
@@ -10,16 +14,19 @@ on its own GPU to ensure complete isolation — no monkey-patching conflicts.
 
 Usage:
   # Auto-parallel on GPUs 0,1,2:
-  python -u -m tests.benchmarks.e2e.qwen_8b_seqlen
+  python -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen
 
   # Custom GPU assignment:
-  python -u -m tests.benchmarks.e2e.qwen_8b_seqlen --gpus 2,3,4
+  python -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen --gpus 2,3,4
 
   # Single-GPU sequential (if only 1 GPU available):
-  python -u -m tests.benchmarks.e2e.qwen_8b_seqlen --sequential
+  python -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen --sequential
+
+  # Custom number of decoder layers:
+  python -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen --layers 2
 
   # Internal: run one phase (called by subprocess):
-  python -u -m tests.benchmarks.e2e.qwen_8b_seqlen --phase pytorch --gpu 0
+  python -u -m tests.benchmarks.e2e.gpt_oss_20b_seqlen --phase pytorch --gpu 0
 """
 
 import torch
@@ -46,34 +53,45 @@ from ..utils import (
 )
 
 
-SEQ_LENS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+SEQ_LENS = [256, 512, 1024, 2048, 4096, 8192]
 BATCH_SIZE = 1
 WARMUP_ITERS = 5
 DURATION_SEC = 15.0
+DEFAULT_LAYERS = 5
 
 
 def reset_environment():
     clear_cuda_state()
     reset_peak_memory()
-    import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
-    importlib.reload(qwen3_mod)
+    import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_mod
+    importlib.reload(gpt_oss_mod)
 
 
-def make_qwen3_8b_config():
-    """Qwen3-8B architecture config (randomly initialized, no checkpoint)."""
-    from transformers import Qwen3Config
-    return Qwen3Config(
-        vocab_size=151936,
-        hidden_size=4096,
-        intermediate_size=14336,
-        num_hidden_layers=36,
-        num_attention_heads=32,
+def make_gpt_oss_20b_config(num_layers: int = DEFAULT_LAYERS):
+    """GPT-OSS-20B architecture config with reduced layers for single-GPU fit.
+
+    All core dimensions match the full 20B model (MoE with 128 experts).
+    Only num_hidden_layers is reduced to fit in GPU memory.
+    """
+    from transformers import GptOssConfig
+    return GptOssConfig(
+        vocab_size=201088,
+        hidden_size=2880,
+        intermediate_size=2880,
+        num_hidden_layers=num_layers,
+        num_attention_heads=64,
         num_key_value_heads=8,
+        head_dim=64,
         hidden_act="silu",
-        max_position_embeddings=32768,
-        rms_norm_eps=1e-6,
+        max_position_embeddings=131072,
+        rms_norm_eps=1e-5,
         tie_word_embeddings=False,
-        head_dim=128,
+        num_local_experts=128,
+        num_experts_per_tok=4,
+        sliding_window=128,
+        attention_dropout=0.0,
+        router_aux_loss_coef=0.9,
+        output_router_logits=True,
     )
 
 
@@ -95,18 +113,17 @@ def run_benchmark(
             print(f"  Patches applied: {applied}")
 
     # Import directly from the module to avoid stale cached references
-    import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
-    Qwen3ForCausalLM = qwen3_mod.Qwen3ForCausalLM
+    import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_mod
+    GptOssForCausalLM = gpt_oss_mod.GptOssForCausalLM
 
     # Verify what's actually being used
-    print(f"  RMSNorm: {qwen3_mod.Qwen3RMSNorm.__module__}.{qwen3_mod.Qwen3RMSNorm.__name__}")
-    print(f"  MLP:     {qwen3_mod.Qwen3MLP.__module__}.{qwen3_mod.Qwen3MLP.__name__}")
-    print(f"  RoPE:    {qwen3_mod.apply_rotary_pos_emb.__module__}.{qwen3_mod.apply_rotary_pos_emb.__name__}")
-    print(f"  Forward: {inspect.getfile(Qwen3ForCausalLM.forward)}")
+    print(f"  RMSNorm: {gpt_oss_mod.GptOssRMSNorm.__module__}.{gpt_oss_mod.GptOssRMSNorm.__name__}")
+    print(f"  RoPE:    {gpt_oss_mod.apply_rotary_pos_emb.__module__}.{gpt_oss_mod.apply_rotary_pos_emb.__name__}")
+    print(f"  Forward: {inspect.getfile(GptOssForCausalLM.forward)}")
 
-    print(f"  Creating Qwen3-8B model...")
+    print(f"  Creating GPT-OSS-20B model ({config.num_hidden_layers} layers, 128 experts)...")
     try:
-        model = Qwen3ForCausalLM(config).cuda().to(torch.bfloat16)
+        model = GptOssForCausalLM(config).cuda().to(torch.bfloat16)
     except torch.cuda.OutOfMemoryError:
         print(f"  OOM creating model — skipping")
         clear_cuda_state()
@@ -115,8 +132,7 @@ def run_benchmark(
     model.train()
     num_params = sum(p.numel() for p in model.parameters())
     tokens_per_iter = batch_size * seq_len
-    print(f"  Model: {num_params / 1e9:.2f}B parameters")
-    print(f"  Batch: {batch_size} x {seq_len} = {tokens_per_iter} tokens/iter")
+    print(f"  Model: {num_params / 1e9:.2f}B parameters (total), batch: {batch_size} x {seq_len} = {tokens_per_iter} tokens/iter")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len), device="cuda")
@@ -127,7 +143,10 @@ def run_benchmark(
     try:
         for _ in range(warmup_iters):
             optimizer.zero_grad()
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(
+                input_ids=input_ids, attention_mask=attention_mask,
+                labels=labels, output_router_logits=True,
+            )
             outputs.loss.backward()
             optimizer.step()
     except torch.cuda.OutOfMemoryError:
@@ -151,7 +170,10 @@ def run_benchmark(
             iter_start = time.perf_counter()
 
             optimizer.zero_grad()
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(
+                input_ids=input_ids, attention_mask=attention_mask,
+                labels=labels, output_router_logits=True,
+            )
             loss = outputs.loss
             loss.backward()
             optimizer.step()
@@ -205,8 +227,8 @@ def run_benchmark(
 # ============================================================================
 
 def setup_liger():
-    from liger_kernel.transformers import apply_liger_kernel_to_qwen3
-    applied = apply_liger_kernel_to_qwen3()
+    from liger_kernel.transformers import apply_liger_kernel_to_gpt_oss
+    applied = apply_liger_kernel_to_gpt_oss()
     return applied
 
 
@@ -215,17 +237,21 @@ def setup_bastile():
     bastile.reset()
     applied = bastile.apply(
         rms_norm=True,
-        swiglu=True,
+        swiglu=False,  # GPT-OSS uses custom MoE gating, not standard SwiGLU
         rope=True,
         fused_linear_cross_entropy=True,
+        moe_experts=True,
+        moe_router=True,
     )
     return applied
 
 
 PHASES = {
-    "pytorch": ("PyTorch", None),
-    "liger":   ("Liger",   setup_liger),
-    "bastile": ("Bastile", setup_bastile),
+    "pytorch":              ("PyTorch",              None),
+    "liger":                ("Liger",                setup_liger),
+    "bastile":              ("Bastile",              setup_bastile),
+    # "bastile_moe":          ("Bastile-MoE",          setup_bastile_moe_only),
+    # "bastile_moe_experts":  ("Bastile-MoEExperts",   setup_bastile_moe_experts),
 }
 
 
@@ -264,10 +290,10 @@ def dict_to_result(d: Optional[dict]) -> Optional[E2EBenchmarkResult]:
 # Single-phase runner (called by subprocess or directly)
 # ============================================================================
 
-def run_phase(phase: str, output_file: str):
+def run_phase(phase: str, output_file: str, num_layers: int = DEFAULT_LAYERS):
     """Run one phase (pytorch/liger/bastile) across all seq lengths, write results to JSON."""
     name, setup_fn = PHASES[phase]
-    config = make_qwen3_8b_config()
+    config = make_gpt_oss_20b_config(num_layers=num_layers)
 
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
     print(f"\n  [{phase.upper()}] Running on {gpu_name} (CUDA {torch.cuda.current_device()})")
@@ -278,14 +304,14 @@ def run_phase(phase: str, output_file: str):
         print_header(f"{name} | seq_len={seq_len}", 100)
 
         # Reset patches for each run
-        if phase == "bastile":
+        if phase.startswith("bastile"):
             import bastile
             bastile.reset()
 
         r = run_benchmark(name, config, setup_fn=setup_fn, seq_len=seq_len)
         results[str(seq_len)] = result_to_dict(r)
 
-        if phase == "bastile":
+        if phase.startswith("bastile"):
             import bastile
             bastile.reset()
 
@@ -299,10 +325,10 @@ def run_phase(phase: str, output_file: str):
 # Parallel orchestrator
 # ============================================================================
 
-def run_parallel(gpus: List[int]):
+def run_parallel(gpus: List[int], num_layers: int = DEFAULT_LAYERS):
     """Spawn 3 subprocesses, one per config, each on its own GPU."""
     phases = ["pytorch", "liger", "bastile"]
-    tmp_dir = tempfile.mkdtemp(prefix="bench_qwen8b_")
+    tmp_dir = tempfile.mkdtemp(prefix="bench_gpt_oss_20b_")
 
     print(f"\n  Launching 3 parallel benchmarks:")
     for phase, gpu in zip(phases, gpus):
@@ -329,10 +355,11 @@ def run_parallel(gpus: List[int]):
 
         cmd = [
             sys.executable, "-u", "-m",
-            "tests.benchmarks.e2e.qwen_8b_seqlen",
+            "tests.benchmarks.e2e.gpt_oss_20b_seqlen",
             "--phase", phase,
             "--gpu", "0",  # always 0 since CUDA_VISIBLE_DEVICES remaps
             "--output", output_file,
+            "--layers", str(num_layers),
         ]
 
         log_fh = open(log_file, "w")
@@ -369,7 +396,7 @@ def run_parallel(gpus: List[int]):
     for phase, proc, _ in procs:
         if proc.returncode != 0:
             log_file = os.path.join(tmp_dir, f"{phase}.log")
-            print(f"\n  ⚠ {phase} failed (exit={proc.returncode}). Log tail:")
+            print(f"\n  WARNING: {phase} failed (exit={proc.returncode}). Log tail:")
             try:
                 with open(log_file) as f:
                     lines = f.readlines()
@@ -388,7 +415,7 @@ def run_parallel(gpus: List[int]):
                 int(k): dict_to_result(v) for k, v in raw.items()
             }
         except FileNotFoundError:
-            print(f"  ⚠ No results for {phase} (file not found)")
+            print(f"  WARNING: No results for {phase} (file not found)")
             all_results[phase] = {sl: None for sl in SEQ_LENS}
 
     # Print logs summary
@@ -399,9 +426,9 @@ def run_parallel(gpus: List[int]):
     return all_results
 
 
-def run_sequential():
+def run_sequential(num_layers: int = DEFAULT_LAYERS):
     """Run all 3 phases sequentially on the current GPU."""
-    config = make_qwen3_8b_config()
+    config = make_gpt_oss_20b_config(num_layers=num_layers)
 
     all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]] = {}
 
@@ -412,7 +439,7 @@ def run_sequential():
         for seq_len in SEQ_LENS:
             print_header(f"{name} | seq_len={seq_len}", 100)
 
-            if phase_key == "bastile":
+            if phase_key.startswith("bastile"):
                 import bastile
                 bastile.reset()
 
@@ -420,7 +447,7 @@ def run_sequential():
                 name, config, setup_fn=setup_fn, seq_len=seq_len,
             )
 
-            if phase_key == "bastile":
+            if phase_key.startswith("bastile"):
                 import bastile
                 bastile.reset()
 
@@ -440,14 +467,9 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
     liger = all_results.get("liger", {})
     bastile = all_results.get("bastile", {})
 
-    def val_or_oom(r, attr):
-        if r is None:
-            return None
-        return getattr(r, attr)
-
-    # ── Tokens/sec ──
+    # -- Tokens/sec --
     print_header("RESULTS — TOKENS/SEC", 110)
-    print(f"\n  {'seq_len':>10}  {'PyTorch':>14}  {'Liger':>14}  {'Bastile':>14}  {'Liger Δ%':>10}  {'Bastile Δ%':>12}")
+    print(f"\n  {'seq_len':>10}  {'PyTorch':>14}  {'Liger':>14}  {'Bastile':>14}  {'Liger D%':>10}  {'Bastile D%':>12}")
     print(f"  {'-' * 90}")
 
     for sl in SEQ_LENS:
@@ -470,7 +492,7 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
             row += f"  {'—':>12}"
         print(row)
 
-    # ── ms/iter ──
+    # -- ms/iter --
     print_header("RESULTS — MS/ITER", 110)
     print(f"\n  {'seq_len':>10}  {'PyTorch':>14}  {'Liger':>14}  {'Bastile':>14}")
     print(f"  {'-' * 60}")
@@ -485,7 +507,7 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
                 row += f"  {'OOM':>14}"
         print(row)
 
-    # ── Peak Memory ──
+    # -- Peak Memory --
     print_header("RESULTS — PEAK MEMORY (GB)", 110)
     print(f"\n  {'seq_len':>10}  {'PyTorch':>14}  {'Liger':>14}  {'Bastile':>14}  {'Liger Saved':>14}  {'Bastile Saved':>16}")
     print(f"  {'-' * 95}")
@@ -508,7 +530,7 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
             row += f"  {'—':>16}"
         print(row)
 
-    # ── Summary ──
+    # -- Summary --
     print_header("SUMMARY", 110)
     print()
     for sl in SEQ_LENS:
@@ -628,30 +650,30 @@ def plot_results(
         plt.close(fig)
         print(f"  Saved: {out_path}")
 
-    print(f"\n  Generating charts → {assets_dir}/")
+    print(f"\n  Generating charts -> {assets_dir}/")
 
     _bar_chart(
-        title="Qwen3-8B E2E Training — Throughput (tokens/sec)",
+        title="GPT-OSS-20B E2E Training — Throughput (tokens/sec)",
         ylabel="Tokens / sec",
-        filename="bench_8b_throughput.png",
+        filename="bench_gpt_oss_20b_throughput.png",
         get_val=lambda r: r.tokens_per_sec,
         fmt_val=lambda v: f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}",
         higher_is_better=True,
     )
 
     _bar_chart(
-        title="Qwen3-8B E2E Training — Latency (ms / iteration)",
+        title="GPT-OSS-20B E2E Training — Latency (ms / iteration)",
         ylabel="ms / iteration",
-        filename="bench_8b_latency.png",
+        filename="bench_gpt_oss_20b_latency.png",
         get_val=lambda r: r.avg_iter_ms,
         fmt_val=lambda v: f"{v:.0f}" if v >= 10 else f"{v:.1f}",
         higher_is_better=False,
     )
 
     _bar_chart(
-        title="Qwen3-8B E2E Training — Peak GPU Memory (GB)",
+        title="GPT-OSS-20B E2E Training — Peak GPU Memory (GB)",
         ylabel="Peak Memory (GB)",
-        filename="bench_8b_memory.png",
+        filename="bench_gpt_oss_20b_memory.png",
         get_val=lambda r: r.peak_memory_gb,
         fmt_val=lambda v: f"{v:.1f}",
         higher_is_better=False,
@@ -666,7 +688,7 @@ def plot_results(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=["pytorch", "liger", "bastile"],
+    parser.add_argument("--phase", choices=["pytorch", "liger", "bastile", "bastile_moe", "bastile_moe_experts"],
                         help="Run a single phase (used by subprocess)")
     parser.add_argument("--gpu", type=int, default=0,
                         help="GPU index (used with --phase)")
@@ -676,20 +698,22 @@ def main():
                         help="Comma-separated GPU indices for parallel run (default: 0,1,2)")
     parser.add_argument("--sequential", action="store_true",
                         help="Run sequentially on current GPU instead of parallel")
+    parser.add_argument("--layers", type=int, default=DEFAULT_LAYERS,
+                        help=f"Number of decoder layers (default: {DEFAULT_LAYERS})")
     args = parser.parse_args()
 
     # Single-phase mode (called by subprocess)
     if args.phase:
         torch.cuda.set_device(args.gpu)
-        run_phase(args.phase, args.output)
+        run_phase(args.phase, args.output, num_layers=args.layers)
         return
 
     # Full benchmark
     print("=" * 110)
-    print("  Qwen3-8B Sequence Length Sweep: PyTorch vs Liger vs Bastile")
+    print("  GPT-OSS-20B Sequence Length Sweep: PyTorch vs Liger vs Bastile")
     print("=" * 110)
-    print(f"\n  Model: Qwen3-8B (36 layers, 4096 hidden, 32 heads), batch_size={BATCH_SIZE}")
-    print(f"  Warmup: {WARMUP_ITERS} iters, Duration: {DURATION_SEC}s per run")
+    print(f"\n  Model: GPT-OSS-20B dims ({args.layers} layers, 2880 hidden, 64 heads, 128 experts, top-4)")
+    print(f"  batch_size={BATCH_SIZE}, Warmup: {WARMUP_ITERS} iters, Duration: {DURATION_SEC}s per run")
     print(f"  Sequence lengths: {SEQ_LENS}")
     print(f"  No pretrained weights — random init only")
 
@@ -703,11 +727,11 @@ def main():
             print(f"\n  Only {num_gpus} GPU(s) available — falling back to sequential mode")
         print(f"\n  Mode: SEQUENTIAL (single GPU)")
         print_gpu_info()
-        all_results = run_sequential()
+        all_results = run_sequential(num_layers=args.layers)
     else:
         gpus = [int(g) for g in args.gpus.split(",")]
         print(f"\n  Mode: PARALLEL (GPUs {gpus})")
-        all_results = run_parallel(gpus)
+        all_results = run_parallel(gpus, num_layers=args.layers)
 
     print_results(all_results)
     plot_results(all_results)

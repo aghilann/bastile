@@ -1,4 +1,4 @@
-"""Configuration dataclasses for all kernel implementations."""
+"""Configuration dataclasses for kernel implementations."""
 
 from dataclasses import dataclass
 
@@ -10,38 +10,18 @@ class RoPEConfig:
     tile_kh: int  # Tile size for key heads
     tile_hd: int  # Tile size for head dimension
     occupancy: int
-    
+
     def __hash__(self):
         return hash((self.tile_qh, self.tile_kh, self.tile_hd, self.occupancy))
 
 
 @dataclass
-class SwiGLUConfig:
-    """Configuration for SwiGLU kernel autotuning."""
-    tile_size: int
-    occupancy: int
-    
+class MoEGemmConfig:
+    """Configuration for MoE GEMM kernel autotuning."""
+    tile_m: int   # Tile size for token dimension (also block_size for alignment)
+    tile_n: int   # Tile size for output dimension
+    tile_k: int   # Tile size for reduction dimension
+    group_m: int  # Group size for M-block swizzling
+
     def __hash__(self):
-        return hash((self.tile_size, self.occupancy))
-
-
-@dataclass
-class GEGLUConfig:
-    """Configuration for GEGLU kernel."""
-    block_size: int
-    occupancy: int
-    use_float32: bool = True
-    
-    def __hash__(self):
-        return hash((self.block_size, self.occupancy, self.use_float32))
-
-
-@dataclass
-class RMSNormConfig:
-    """Configuration for RMSNorm kernel autotuning."""
-    use_static_persistent: bool
-    tile_size_m: int  # For persistent mode
-    tile_size_n: int  # Tile size for columns
-    
-    def __hash__(self):
-        return hash((self.use_static_persistent, self.tile_size_m, self.tile_size_n))
+        return hash((self.tile_m, self.tile_n, self.tile_k, self.group_m))

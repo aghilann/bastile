@@ -35,15 +35,25 @@ def _apply_patch(patch: PatchInfo) -> bool:
         logger.warning(f"Could not apply patch '{patch.name}': module not found")
         return False
     
-    if not hasattr(module, patch.target_attr):
+    # Handle dotted target_attr (e.g., "GptOssForCausalLM.forward")
+    parts = patch.target_attr.split(".")
+    obj = module
+    for part in parts[:-1]:
+        if not hasattr(obj, part):
+            logger.warning(f"Could not apply patch '{patch.name}': {part} not found in {patch.target_module}")
+            return False
+        obj = getattr(obj, part)
+    
+    attr_name = parts[-1]
+    if not hasattr(obj, attr_name):
         logger.warning(f"Could not apply patch '{patch.name}': {patch.target_attr} not found in {patch.target_module}")
         return False
     
     # Store original
-    original = getattr(module, patch.target_attr)
+    original = getattr(obj, attr_name)
     
     # Apply patch
-    setattr(module, patch.target_attr, patch.replacement)
+    setattr(obj, attr_name, patch.replacement)
     
     # Mark as applied
     registry = get_registry()
@@ -67,8 +77,16 @@ def _reset_patch(patch: PatchInfo) -> bool:
     if module is None:
         return False
     
+    # Handle dotted target_attr (e.g., "GptOssForCausalLM.forward")
+    parts = patch.target_attr.split(".")
+    obj = module
+    for part in parts[:-1]:
+        if not hasattr(obj, part):
+            return False
+        obj = getattr(obj, part)
+    
     # Restore original
-    setattr(module, patch.target_attr, patch.original)
+    setattr(obj, parts[-1], patch.original)
     
     # Mark as reset
     registry = get_registry()
@@ -84,6 +102,8 @@ def apply(
     rope: bool = True,       # CuTile RoPE with autotuning
     cross_entropy: bool = False,  # Deprecated, unused (kept for API compat)
     fused_linear_cross_entropy: bool = True,  # Fused linear + CE via quack (skips logits)
+    moe_experts: bool = True,  # CuTile fused MoE experts (includes gate) for GPT-OSS
+    moe_router: bool = True,  # Fused MoE router + load-balancing loss for GPT-OSS
     model_type: Optional[str] = None,
 ) -> List[str]:
     """
@@ -95,6 +115,8 @@ def apply(
         rope: Whether to patch RoPE (default: True)
         cross_entropy: Deprecated, no-op (kept for backwards compatibility)
         fused_linear_cross_entropy: Whether to use fused linear + CE (default: True)
+        moe_experts: Whether to patch MoE experts with CuTile fused GEMM (default: True)
+        moe_router: Whether to patch MoE router + load-balancing loss (default: True)
         model_type: Optional model type filter (e.g., 'qwen3')
 
     Returns:
@@ -114,6 +136,8 @@ def apply(
         'rms_norm': rms_norm,
         'swiglu': swiglu,
         'rope': rope,
+        'moe_router': moe_router,
+        'moe_load_balancing': moe_router,
     }
 
     applied = []
@@ -137,17 +161,43 @@ def apply(
             applied.append(patch.name)
 
     # Apply fused linear cross-entropy if requested
-    # This patches Qwen3ForCausalLM.forward to skip logits materialization
+    # Patches ForCausalLM.forward to skip logits materialization
     if fused_linear_cross_entropy:
+        # Qwen3
         try:
             from .ops.fused_linear_cross_entropy import bastile_lce_forward
             import transformers.models.qwen3.modeling_qwen3 as qwen3_module
 
             qwen3_module.Qwen3ForCausalLM.forward = bastile_lce_forward
-            applied.append("fused_linear_cross_entropy")
-            logger.info("Applied fused linear cross-entropy (skips logits materialization)")
+            applied.append("fused_linear_cross_entropy_qwen3")
+            logger.info("Applied fused linear cross-entropy for Qwen3")
         except Exception as e:
-            logger.warning(f"Could not apply fused linear cross-entropy: {e}")
+            logger.warning(f"Could not apply fused linear cross-entropy for Qwen3: {e}")
+
+        # GPT-OSS
+        try:
+            from .ops.fused_linear_cross_entropy import bastile_gpt_oss_lce_forward
+            import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_module
+
+            gpt_oss_module.GptOssForCausalLM.forward = bastile_gpt_oss_lce_forward
+            applied.append("fused_linear_cross_entropy_gpt_oss")
+            logger.info("Applied fused linear cross-entropy for GPT-OSS")
+        except Exception as e:
+            logger.warning(f"Could not apply fused linear cross-entropy for GPT-OSS: {e}")
+
+    # Apply CuTile fused MoE experts for GPT-OSS
+    # Replaces entire GptOssExperts.forward with fused GEMM kernels
+    # (includes the gate kernel internally, so no separate moe_gate patch needed)
+    if moe_experts:
+        try:
+            from .ops.moe_experts import cutile_moe_experts_forward
+            import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_module
+
+            gpt_oss_module.GptOssExperts.forward = cutile_moe_experts_forward
+            applied.append("moe_experts_gpt_oss")
+            logger.info("Applied CuTile fused MoE experts for GPT-OSS")
+        except Exception as e:
+            logger.warning(f"Could not apply MoE experts for GPT-OSS: {e}")
 
     # Warmup kernels to avoid JIT overhead during training
     try:
