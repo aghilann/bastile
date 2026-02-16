@@ -15,35 +15,22 @@ Two forward implementations:
    (BT, V) would OOM.
 
 Architecture Notes:
-  Quack achieves peak CE performance with SM-cluster cooperation and
-  warp-level online-softmax reductions (CuTE DSL).  CuTile does not
-  expose cluster APIs or warp primitives, so our CE kernel uses a
-  per-row persistent loop with gather-based column tiles instead.
+  CuTile does not expose cluster APIs or warp primitives, so our CE
+  kernel uses a per-row persistent loop with gather-based column tiles.
   The GEMMs use cuBLAS via torch.mm for peak TensorCore throughput.
 """
 
-from typing import Optional
-
 import cuda.tile as ct
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.amp import custom_fwd, custom_bwd
 
-from ..registry import register_patch
+from .utils import get_sm_count
 
 ConstInt = ct.Constant[int]
 
 _ALIGN = 8  # GEMM alignment
-_sms: int = 0
-
-
-def _get_sms():
-    global _sms
-    if _sms == 0:
-        _sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-    return _sms
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -133,7 +120,7 @@ def _ce_cutile(logits_chunk: Tensor, target_chunk: Tensor,
 
     # Launch CuTile kernel: 2-pass online softmax → loss + probs
     TILE_V = 4096
-    sms = _get_sms()
+    sms = get_sm_count()
     grid = (min(sms * 4, M),)
     ct.launch(
         torch.cuda.current_stream(), grid, _ce_online_kernel,
@@ -519,15 +506,3 @@ def warmup_fused_lce(
     loss = fused_linear_cross_entropy(x, w, t)
     loss.backward()
     torch.cuda.synchronize()
-
-
-register_patch(
-    name="fused_linear_cross_entropy_qwen3",
-    description="Fused Linear Cross-Entropy for Qwen3",
-    target_module="transformers.models.qwen3.modeling_qwen3",
-    target_attr="Qwen3ForCausalLM.forward",
-    replacement=bastile_lce_forward,
-    has_backward=True,
-    priority=10,
-    models=["qwen3"],
-    )

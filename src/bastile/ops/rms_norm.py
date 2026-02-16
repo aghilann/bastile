@@ -5,7 +5,7 @@ import torch.nn as nn
 import cuda.tile as ct
 
 from ..registry import register_patch
-from .utils import next_power_of_2
+from .utils import next_power_of_2, get_sm_count
 
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
@@ -69,21 +69,12 @@ def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ConstInt, TILE_N: Cons
     ct.store(dw_partial, index=(bid, 0), tile=dw_acc, allow_tma=False)
 
 
-_sms: int = 0
-_stream = None
 _fwd_cfg: dict = {}  # (M, N, dtype) -> (tile_m, tile_n, grid)
 _bwd_cfg: dict = {}  # (M, N) -> (tile_m, tile_n, grid, N)
 
 
-def _get_sms():
-    global _sms
-    if _sms == 0:
-        _sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-    return _sms
-
-
 def _fwd_tiles(M, N):
-    sms = _get_sms()
+    sms = get_sm_count()
     T = next_power_of_2(N)
     if M <= sms * 4:
         return (1, T, min(sms, M))
@@ -104,7 +95,7 @@ def _bwd_tiles(M, N):
         tm = 4
     else:
         tm = 1
-    sms = _get_sms()
+    sms = get_sm_count()
     tiles = (M + tm - 1) // tm
     g = min(sms, tiles)
     if tiles <= 64:
@@ -115,7 +106,6 @@ def _bwd_tiles(M, N):
 class CuTileRMSNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, eps):
-        global _stream
         shape = x.shape
         N = shape[-1]
         x2 = x.reshape(-1, N)
@@ -127,12 +117,10 @@ class CuTileRMSNormFunction(torch.autograd.Function):
             _fwd_cfg[(M, N, x.dtype)] = cfg
         tm, tn, g = cfg
 
-        if _stream is None:
-            _stream = torch.cuda.current_stream()
-
+        stream = torch.cuda.current_stream()
         y = torch.empty_like(x2)
         rstd = torch.empty(M, dtype=torch.float32, device=x.device)
-        ct.launch(_stream, (g,), _rms_fwd, (x2, weight, y, rstd, tm, tn, eps))
+        ct.launch(stream, (g,), _rms_fwd, (x2, weight, y, rstd, tm, tn, eps))
 
         ctx.save_for_backward(x, weight, rstd)
         ctx.eps = eps
@@ -140,7 +128,6 @@ class CuTileRMSNormFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        global _stream
         x, weight, rstd = ctx.saved_tensors
         shape = x.shape
         N = shape[-1]
@@ -156,12 +143,10 @@ class CuTileRMSNormFunction(torch.autograd.Function):
             _bwd_cfg[(M, N)] = cfg
         tm, T, g, No = cfg
 
-        if _stream is None:
-            _stream = torch.cuda.current_stream()
-
+        stream = torch.cuda.current_stream()
         dx = torch.empty_like(x2)
         dwp = torch.empty((g, T), device=x.device, dtype=torch.float32)
-        ct.launch(_stream, (g,), _rms_bwd, (dx, dy2, x2, weight, rstd, dwp, tm, T))
+        ct.launch(stream, (g,), _rms_bwd, (dx, dy2, x2, weight, rstd, dwp, tm, T))
 
         dw = dwp.sum(0)
         if T != No:

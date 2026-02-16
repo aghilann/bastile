@@ -28,9 +28,9 @@ import os
 import sys
 import json
 import time
+import inspect
 import argparse
 import importlib
-import inspect
 import subprocess
 import tempfile
 from typing import Optional, Callable, List, Dict
@@ -102,7 +102,7 @@ def run_benchmark(
     print(f"  RMSNorm: {qwen3_mod.Qwen3RMSNorm.__module__}.{qwen3_mod.Qwen3RMSNorm.__name__}")
     print(f"  MLP:     {qwen3_mod.Qwen3MLP.__module__}.{qwen3_mod.Qwen3MLP.__name__}")
     print(f"  RoPE:    {qwen3_mod.apply_rotary_pos_emb.__module__}.{qwen3_mod.apply_rotary_pos_emb.__name__}")
-    print(f"  Forward: {inspect.getfile(Qwen3ForCausalLM.forward)}")
+    print(f"  Forward: {Qwen3ForCausalLM.forward.__module__}.{Qwen3ForCausalLM.forward.__name__}")
 
     print(f"  Creating Qwen3-8B model...")
     try:

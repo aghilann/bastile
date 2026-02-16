@@ -8,8 +8,6 @@ import importlib
 import logging
 from typing import Optional, List, Any
 
-import torch
-
 from .registry import get_registry, PatchInfo
 
 logger = logging.getLogger(__name__)
@@ -79,12 +77,12 @@ def _reset_patch(patch: PatchInfo) -> bool:
 
 
 def apply(
-    rms_norm: bool = True,   # CuTile RMSNorm with full backward (from TileGym)
-    swiglu: bool = True,     # CuTile SwiGLU with full backward (from TileGym)
-    rope: bool = True,       # CuTile RoPE with autotuning
-    cross_entropy: bool = False,  # Deprecated, unused (kept for API compat)
-    fused_linear_cross_entropy: bool = True,  # Fused linear + CE via quack (skips logits)
+    rms_norm: bool = True,
+    swiglu: bool = True,
+    rope: bool = True,
+    fused_linear_cross_entropy: bool = True,
     model_type: Optional[str] = None,
+    **kwargs,
 ) -> List[str]:
     """
     Apply CuTile kernel patches to PyTorch/HuggingFace.
@@ -93,7 +91,6 @@ def apply(
         rms_norm: Whether to patch RMSNorm (default: True)
         swiglu: Whether to patch SwiGLU/MLP (default: True)
         rope: Whether to patch RoPE (default: True)
-        cross_entropy: Deprecated, no-op (kept for backwards compatibility)
         fused_linear_cross_entropy: Whether to use fused linear + CE (default: True)
         model_type: Optional model type filter (e.g., 'qwen3')
 
@@ -102,14 +99,12 @@ def apply(
 
     Example:
         >>> import bastile
-        >>> bastile.apply(fused_linear_cross_entropy=True)
+        >>> bastile.apply()
     """
-    # Import ops to register patches
     from . import ops  # noqa: F401
 
     registry = get_registry()
 
-    # Build list of patches to apply based on flags
     patch_filter = {
         'rms_norm': rms_norm,
         'swiglu': swiglu,

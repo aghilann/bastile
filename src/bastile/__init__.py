@@ -4,13 +4,13 @@ Bastile - Monkey-patch PyTorch with optimized CuTile kernels for training.
 Usage:
     import bastile
     bastile.apply()  # Patches common PyTorch ops with CuTile kernels
-    
-    # Or selectively:
-    bastile.apply(rms_norm=True, swiglu=True, rope=False)
-    
+
+    # Selectively:
+    bastile.apply(rms_norm=True, swiglu=True, rope=True)
+
     # For HuggingFace models:
     bastile.apply_to_model(model)  # Patches a loaded model
-    
+
     # Clear autotuning cache:
     bastile.clear_autotune_cache()
 """

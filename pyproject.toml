@@ -19,9 +19,6 @@ classifiers = [
 
 dependencies = [
     "torch>=2.4.0",
-    "torchvision>=0.17.0",
-    "nvidia-cutlass>=4.2.0.0",
-    "nvidia-cutlass-dsl>=4.3.5",
     "transformers>=4.40.0",
 ]
 
@@ -58,7 +55,6 @@ path = "src/bastile/__init__.py"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

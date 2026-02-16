@@ -3,13 +3,13 @@ Bastile Operations - kernel implementations with backward passes.
 
 Supported models:
 - Qwen3: RMSNorm (CuTile), SwiGLU (CuTile), RoPE (CuTile),
-         Fused Linear Cross-Entropy (quack)
+         Fused Linear Cross-Entropy (CuTile)
 
 This module automatically registers all available patches when imported.
 """
 
 from . import rms_norm  # CuTile RMSNorm (persistent fwd + persistent bwd)
-from . import swiglu  # CuTile SwiGLU
-from . import rope  # CuTile RoPE
+from . import swiglu    # CuTile SwiGLU
+from . import rope      # CuTile RoPE with autotuning
 
 __all__ = ['rms_norm', 'swiglu', 'rope']

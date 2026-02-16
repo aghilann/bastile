@@ -9,6 +9,8 @@ import gc
 import torch
 import torch.nn.functional as F
 
+from ..utils import benchmark_fn as _benchmark_fn_us, clear_cuda_state
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
@@ -19,17 +21,8 @@ dtype = torch.bfloat16
 
 
 def benchmark_fn(fn, warmup=5, iters=20):
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    for i in range(iters):
-        starts[i].record(); fn(); ends[i].record()
-    torch.cuda.synchronize()
-    times = sorted(s.elapsed_time(e) for s, e in zip(starts, ends))
-    trim = max(1, iters // 10)
-    return sum(times[trim:-trim]) / len(times[trim:-trim])
+    """Benchmark returning milliseconds (trimmed mean)."""
+    return _benchmark_fn_us(fn, warmup=warmup, iterations=iters) / 1000.0
 
 
 def measure_peak_memory(fn, warmup=3):
@@ -37,12 +30,11 @@ def measure_peak_memory(fn, warmup=3):
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
-    gc.collect()
-    torch.cuda.empty_cache()
+    clear_cuda_state()
     torch.cuda.reset_peak_memory_stats()
     fn()
     torch.cuda.synchronize()
-    return torch.cuda.max_memory_allocated() / (1024 ** 2)  # MB
+    return torch.cuda.max_memory_allocated() / (1024 ** 2)
 
 
 print(f"{'='*120}")
@@ -63,13 +55,6 @@ from bastile.ops.fused_linear_cross_entropy import fused_linear_cross_entropy as
 warmup_fused_lce(H, V, dtype)
 print("  Bastile CuTile-CE ✓")
 
-from quack.linear_cross_entropy import chunked_linear_cross_entropy as quack_lce
-x_q = torch.randn(8, H, dtype=dtype, device=device, requires_grad=True)
-w_q = weight.clone().requires_grad_(True)
-quack_lce(x_q, w_q, torch.randint(0, V, (8,), device=device), chunk_size=4096, reduction="mean").backward()
-torch.cuda.synchronize()
-print("  Quack ✓")
-
 from liger_kernel.ops.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyFunction
 x_l = torch.randn(8, H, dtype=dtype, device=device, requires_grad=True)
 w_l = weight.clone().requires_grad_(True)
@@ -83,7 +68,7 @@ print()
 # Speed benchmark
 # ══════════════════════════════════════════════════════════════════════════
 print("─── SPEED (forward + backward) ────────────────────────────────────────────────")
-hdr = f"{'BT':>8} {'SeqLen':>8} | {'PyTorch':>10} {'Bastile':>10} {'Quack':>10} {'Liger':>10} | {'Bast/PT':>8} {'Bast/Qk':>8}"
+hdr = f"{'BT':>8} {'SeqLen':>8} | {'PyTorch':>10} {'Bastile':>10} {'Liger':>10} | {'Bast/PT':>8} {'Bast/Lg':>8}"
 print(hdr)
 print("─" * len(hdr))
 
@@ -105,11 +90,6 @@ for BT in BT_sizes:
         wc = weight.clone().requires_grad_(True)
         bastile_lce(xc, wc, t, chunk_size=4096).backward()
 
-    def run_quack():
-        xq = x.detach().requires_grad_(True)
-        wq = weight.clone().requires_grad_(True)
-        quack_lce(xq, wq, t, chunk_size=4096, reduction="mean").backward()
-
     def run_liger():
         xl = x.detach().requires_grad_(True)
         wl = weight.clone().requires_grad_(True)
@@ -118,7 +98,7 @@ for BT in BT_sizes:
 
     results = {}
     for name, fn in [("PyTorch", run_pytorch), ("Bastile", run_bastile),
-                      ("Quack", run_quack), ("Liger", run_liger)]:
+                      ("Liger", run_liger)]:
         try:
             results[name] = benchmark_fn(fn)
         except Exception as e:
@@ -128,21 +108,20 @@ for BT in BT_sizes:
     speed_results[BT] = results
     t_pt = results["PyTorch"]
     t_ba = results["Bastile"]
-    t_qk = results["Quack"]
     t_lg = results["Liger"]
 
     def fmt(v):
         return f"{v:>8.2f}ms" if v < float('inf') else "     OOM"
 
-    print(f"{BT:>8} {seq_len:>8} | {fmt(t_pt)} {fmt(t_ba)} {fmt(t_qk)} {fmt(t_lg)} | "
-          f"{t_ba/t_pt:>7.2f}x {t_ba/t_qk:>7.2f}x")
+    print(f"{BT:>8} {seq_len:>8} | {fmt(t_pt)} {fmt(t_ba)} {fmt(t_lg)} | "
+          f"{t_ba/t_pt:>7.2f}x {t_ba/t_lg:>7.2f}x")
 
 # ══════════════════════════════════════════════════════════════════════════
 # Peak memory benchmark
 # ══════════════════════════════════════════════════════════════════════════
 print()
 print("─── PEAK GPU MEMORY (forward + backward) ─────────────────────────────────────")
-hdr2 = f"{'BT':>8} {'SeqLen':>8} | {'PyTorch':>10} {'Bastile':>10} {'Quack':>10} {'Liger':>10} | {'Bast/PT':>8} {'Logits':>10}"
+hdr2 = f"{'BT':>8} {'SeqLen':>8} | {'PyTorch':>10} {'Bastile':>10} {'Liger':>10} | {'Bast/PT':>8} {'Logits':>10}"
 print(hdr2)
 print("─" * len(hdr2))
 
@@ -165,11 +144,6 @@ for BT in BT_sizes:
         wc = weight.clone().requires_grad_(True)
         bastile_lce(xc, wc, t, chunk_size=4096).backward()
 
-    def run_quack():
-        xq = x.detach().requires_grad_(True)
-        wq = weight.clone().requires_grad_(True)
-        quack_lce(xq, wq, t, chunk_size=4096, reduction="mean").backward()
-
     def run_liger():
         xl = x.detach().requires_grad_(True)
         wl = weight.clone().requires_grad_(True)
@@ -178,7 +152,7 @@ for BT in BT_sizes:
 
     mem = {}
     for name, fn in [("PyTorch", run_pytorch), ("Bastile", run_bastile),
-                      ("Quack", run_quack), ("Liger", run_liger)]:
+                      ("Liger", run_liger)]:
         try:
             mem[name] = measure_peak_memory(fn)
         except Exception as e:
@@ -187,7 +161,6 @@ for BT in BT_sizes:
 
     m_pt = mem["PyTorch"]
     m_ba = mem["Bastile"]
-    m_qk = mem["Quack"]
     m_lg = mem["Liger"]
 
     def fmt_mem(v):
@@ -198,10 +171,10 @@ for BT in BT_sizes:
         return f"{v:>8.0f}MB"
 
     ratio = m_ba / m_pt if m_pt > 0 and m_pt < float('inf') else float('inf')
-    print(f"{BT:>8} {seq_len:>8} | {fmt_mem(m_pt)} {fmt_mem(m_ba)} {fmt_mem(m_qk)} {fmt_mem(m_lg)} | "
+    print(f"{BT:>8} {seq_len:>8} | {fmt_mem(m_pt)} {fmt_mem(m_ba)} {fmt_mem(m_lg)} | "
           f"{ratio:>7.2f}x {logits_size_mb:>8.0f}MB")
 
 print()
 print("Note: 'Logits' column shows theoretical full [BT, V] logits tensor size (bf16).")
-print("      Chunked approaches (Bastile/Quack/Liger) avoid materializing this.")
+print("      Chunked approaches (Bastile/Liger) avoid materializing this.")
 print("\nDone!")

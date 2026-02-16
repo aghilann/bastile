@@ -11,10 +11,6 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 
-# ============================================================================
-# GPU Utilities
-# ============================================================================
-
 def get_gpu_info() -> dict:
     """Get GPU information."""
     props = torch.cuda.get_device_properties(0)
@@ -58,10 +54,6 @@ def get_peak_memory_gb() -> float:
     """Get peak memory allocated in GB."""
     return torch.cuda.max_memory_allocated() / 1024**3
 
-
-# ============================================================================
-# Timing Utilities
-# ============================================================================
 
 def benchmark_fn(
     fn: Callable,
@@ -168,10 +160,6 @@ class Timer:
         return self.end_time - self.start_time
 
 
-# ============================================================================
-# Throughput Utilities
-# ============================================================================
-
 def compute_throughput_gbps(
     total_bytes: int,
     latency_us: float,
@@ -189,10 +177,6 @@ def compute_bandwidth_utilization(
         peak_bw_gbps = get_peak_bandwidth()
     return (throughput_gbps / peak_bw_gbps) * 100
 
-
-# ============================================================================
-# Data Classes
-# ============================================================================
 
 @dataclass
 class KernelBenchmarkResult:
@@ -230,10 +214,6 @@ class E2EBenchmarkResult:
         return other.peak_memory_gb - self.peak_memory_gb
 
 
-# ============================================================================
-# Printing Utilities
-# ============================================================================
-
 def print_header(title: str, width: int = 80):
     """Print a section header."""
     print("\n" + "=" * width)
@@ -257,34 +237,3 @@ def format_speedup(speedup: float) -> str:
         return f"{1/speedup:.2f}x slower"
 
 
-# ============================================================================
-# JIT Warmup
-# ============================================================================
-
-def jit_warmup_kernel(
-    kernel_fn: Callable,
-    input_generator: Callable,
-    configs: List[tuple],
-    num_warmup: int = 5,
-):
-    """
-    Generic JIT warmup for CuTile kernels.
-    
-    Args:
-        kernel_fn: The kernel function to warm up
-        input_generator: Function that takes config tuple and returns inputs
-        configs: List of config tuples
-        num_warmup: Number of warmup iterations per config
-    """
-    print("JIT compiling kernels...")
-    
-    for config in configs:
-        inputs = input_generator(config)
-        for _ in range(num_warmup):
-            if isinstance(inputs, tuple):
-                _ = kernel_fn(*inputs)
-            else:
-                _ = kernel_fn(inputs)
-        torch.cuda.synchronize()
-    
-    print("JIT compilation complete.\n")
