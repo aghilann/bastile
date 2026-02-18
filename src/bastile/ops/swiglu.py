@@ -9,26 +9,22 @@ Key optimizations:
 5. Full backward pass with recomputation (no extra memory)
 """
 
+import cuda.tile as ct
 import torch
 import torch.nn as nn
-from typing import Tuple
+from cuda.tile._numeric_semantics import RoundingMode as RMd
 
 from ..registry import register_patch
-from .utils import next_power_of_2, ceildiv
-
-import cuda.tile as ct
-from cuda.tile._numeric_semantics import RoundingMode as RMd
+from .utils import next_power_of_2
 
 ConstInt = ct.Constant[int]
 
 
-# ============================================================================
-# Forward kernel
-# ============================================================================
-
 @ct.kernel
 def swiglu_forward_kernel(
-    gate, up, output,
+    gate,
+    up,
+    output,
     TILE_SIZE: ConstInt,
 ):
     """SwiGLU forward: silu(gate) * up using gather/scatter.
@@ -54,13 +50,13 @@ def swiglu_forward_kernel(
     ct.scatter(output, (bid, offsets), result, check_bounds=True)
 
 
-# ============================================================================
-# Backward kernel
-# ============================================================================
-
 @ct.kernel
 def swiglu_backward_kernel(
-    grad_output, gate, up, grad_gate, grad_up,
+    grad_output,
+    gate,
+    up,
+    grad_gate,
+    grad_up,
     TILE_SIZE: ConstInt,
 ):
     """SwiGLU backward with gather/scatter and recomputation.
@@ -94,10 +90,6 @@ def swiglu_backward_kernel(
     ct.scatter(grad_up, (bid, offsets), du, check_bounds=True)
 
 
-# ============================================================================
-# Launch functions
-# ============================================================================
-
 def swiglu_forward_cutile(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """CuTile-accelerated SwiGLU forward.
 
@@ -129,7 +121,7 @@ def swiglu_backward_cutile(
     grad_output: torch.Tensor,
     gate: torch.Tensor,
     up: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """CuTile-accelerated SwiGLU backward."""
     ori_shape = grad_output.shape
     n_cols = ori_shape[-1]
@@ -154,10 +146,6 @@ def swiglu_backward_cutile(
     return grad_gate.view(*ori_shape), grad_up.view(*ori_shape)
 
 
-# ============================================================================
-# Autograd wrapper
-# ============================================================================
-
 class SwiGLUFunction(torch.autograd.Function):
     """CuTile SwiGLU with full backward support."""
 
@@ -179,10 +167,6 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return SwiGLUFunction.apply(gate, up)
 
 
-# ============================================================================
-# MLP Module
-# ============================================================================
-
 class CuTileSwiGLUMLP(nn.Module):
     """Drop-in replacement for Qwen3MLP using CuTile SwiGLU."""
 
@@ -196,7 +180,7 @@ class CuTileSwiGLUMLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
-        if hasattr(config, 'hidden_act') and config.hidden_act not in ["silu", "swish"]:
+        if hasattr(config, "hidden_act") and config.hidden_act not in ["silu", "swish"]:
             raise ValueError(f"Activation function {config.hidden_act} not supported.")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

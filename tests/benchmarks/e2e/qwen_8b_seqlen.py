@@ -22,29 +22,27 @@ Usage:
   python -u -m tests.benchmarks.e2e.qwen_8b_seqlen --phase pytorch --gpu 0
 """
 
-import torch
-import gc
-import os
-import sys
-import json
-import time
 import argparse
 import importlib
-import inspect
+import json
+import os
 import subprocess
+import sys
 import tempfile
-from typing import Optional, Callable, List, Dict
+import time
+from collections.abc import Callable
 from pathlib import Path
 
-from ..utils import (
-    clear_cuda_state,
-    reset_peak_memory,
-    get_peak_memory_gb,
-    print_header,
-    print_gpu_info,
-    E2EBenchmarkResult,
-)
+import torch
 
+from ..utils import (
+    E2EBenchmarkResult,
+    clear_cuda_state,
+    get_peak_memory_gb,
+    print_gpu_info,
+    print_header,
+    reset_peak_memory,
+)
 
 SEQ_LENS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 BATCH_SIZE = 1
@@ -56,12 +54,14 @@ def reset_environment():
     clear_cuda_state()
     reset_peak_memory()
     import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
+
     importlib.reload(qwen3_mod)
 
 
 def make_qwen3_8b_config():
     """Qwen3-8B architecture config (randomly initialized, no checkpoint)."""
     from transformers import Qwen3Config
+
     return Qwen3Config(
         vocab_size=151936,
         hidden_size=4096,
@@ -80,12 +80,12 @@ def make_qwen3_8b_config():
 def run_benchmark(
     name: str,
     config,
-    setup_fn: Optional[Callable] = None,
+    setup_fn: Callable | None = None,
     batch_size: int = BATCH_SIZE,
     seq_len: int = 2048,
     warmup_iters: int = WARMUP_ITERS,
     duration_sec: float = DURATION_SEC,
-) -> Optional[E2EBenchmarkResult]:
+) -> E2EBenchmarkResult | None:
     reset_environment()
 
     if setup_fn:
@@ -96,19 +96,20 @@ def run_benchmark(
 
     # Import directly from the module to avoid stale cached references
     import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
+
     Qwen3ForCausalLM = qwen3_mod.Qwen3ForCausalLM
 
     # Verify what's actually being used
     print(f"  RMSNorm: {qwen3_mod.Qwen3RMSNorm.__module__}.{qwen3_mod.Qwen3RMSNorm.__name__}")
     print(f"  MLP:     {qwen3_mod.Qwen3MLP.__module__}.{qwen3_mod.Qwen3MLP.__name__}")
     print(f"  RoPE:    {qwen3_mod.apply_rotary_pos_emb.__module__}.{qwen3_mod.apply_rotary_pos_emb.__name__}")
-    print(f"  Forward: {inspect.getfile(Qwen3ForCausalLM.forward)}")
+    print(f"  Forward: {Qwen3ForCausalLM.forward.__module__}.{Qwen3ForCausalLM.forward.__name__}")
 
-    print(f"  Creating Qwen3-8B model...")
+    print("  Creating Qwen3-8B model...")
     try:
         model = Qwen3ForCausalLM(config).cuda().to(torch.bfloat16)
     except torch.cuda.OutOfMemoryError:
-        print(f"  OOM creating model — skipping")
+        print("  OOM creating model — skipping")
         clear_cuda_state()
         return None
 
@@ -131,7 +132,7 @@ def run_benchmark(
             outputs.loss.backward()
             optimizer.step()
     except torch.cuda.OutOfMemoryError:
-        print(f"  OOM during warmup — skipping")
+        print("  OOM during warmup — skipping")
         del model, optimizer
         clear_cuda_state()
         return None
@@ -191,8 +192,10 @@ def run_benchmark(
         loss_history=losses,
     )
 
-    print(f"  Complete: {result.iterations} iters, {result.tokens_per_sec:,.0f} tok/s, "
-          f"{result.avg_iter_ms:.1f} ms/iter, {result.peak_memory_gb:.2f} GB")
+    print(
+        f"  Complete: {result.iterations} iters, {result.tokens_per_sec:,.0f} tok/s, "
+        f"{result.avg_iter_ms:.1f} ms/iter, {result.peak_memory_gb:.2f} GB"
+    )
 
     del model, optimizer
     clear_cuda_state()
@@ -200,18 +203,16 @@ def run_benchmark(
     return result
 
 
-# ============================================================================
-# Setup functions for each configuration
-# ============================================================================
-
 def setup_liger():
     from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+
     applied = apply_liger_kernel_to_qwen3()
     return applied
 
 
 def setup_bastile():
     import bastile
+
     bastile.reset()
     applied = bastile.apply(
         rms_norm=True,
@@ -224,12 +225,12 @@ def setup_bastile():
 
 PHASES = {
     "pytorch": ("PyTorch", None),
-    "liger":   ("Liger",   setup_liger),
+    "liger": ("Liger", setup_liger),
     "bastile": ("Bastile", setup_bastile),
 }
 
 
-def result_to_dict(r: Optional[E2EBenchmarkResult]) -> Optional[dict]:
+def result_to_dict(r: E2EBenchmarkResult | None) -> dict | None:
     if r is None:
         return None
     return {
@@ -244,7 +245,7 @@ def result_to_dict(r: Optional[E2EBenchmarkResult]) -> Optional[dict]:
     }
 
 
-def dict_to_result(d: Optional[dict]) -> Optional[E2EBenchmarkResult]:
+def dict_to_result(d: dict | None) -> E2EBenchmarkResult | None:
     if d is None:
         return None
     return E2EBenchmarkResult(
@@ -260,10 +261,6 @@ def dict_to_result(d: Optional[dict]) -> Optional[E2EBenchmarkResult]:
     )
 
 
-# ============================================================================
-# Single-phase runner (called by subprocess or directly)
-# ============================================================================
-
 def run_phase(phase: str, output_file: str):
     """Run one phase (pytorch/liger/bastile) across all seq lengths, write results to JSON."""
     name, setup_fn = PHASES[phase]
@@ -272,7 +269,7 @@ def run_phase(phase: str, output_file: str):
     gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
     print(f"\n  [{phase.upper()}] Running on {gpu_name} (CUDA {torch.cuda.current_device()})")
 
-    results: Dict[str, Optional[dict]] = {}
+    results: dict[str, dict | None] = {}
 
     for seq_len in SEQ_LENS:
         print_header(f"{name} | seq_len={seq_len}", 100)
@@ -280,6 +277,7 @@ def run_phase(phase: str, output_file: str):
         # Reset patches for each run
         if phase == "bastile":
             import bastile
+
             bastile.reset()
 
         r = run_benchmark(name, config, setup_fn=setup_fn, seq_len=seq_len)
@@ -287,6 +285,7 @@ def run_phase(phase: str, output_file: str):
 
         if phase == "bastile":
             import bastile
+
             bastile.reset()
 
     # Write results to JSON
@@ -295,16 +294,12 @@ def run_phase(phase: str, output_file: str):
     print(f"\n  [{phase.upper()}] Results written to {output_file}")
 
 
-# ============================================================================
-# Parallel orchestrator
-# ============================================================================
-
-def run_parallel(gpus: List[int]):
+def run_parallel(gpus: list[int]):
     """Spawn 3 subprocesses, one per config, each on its own GPU."""
     phases = ["pytorch", "liger", "bastile"]
     tmp_dir = tempfile.mkdtemp(prefix="bench_qwen8b_")
 
-    print(f"\n  Launching 3 parallel benchmarks:")
+    print("\n  Launching 3 parallel benchmarks:")
     for phase, gpu in zip(phases, gpus):
         print(f"    {phase:>8} → GPU {gpu}")
     print(f"  Temp dir: {tmp_dir}\n")
@@ -328,23 +323,31 @@ def run_parallel(gpus: List[int]):
         env["PYTHONUNBUFFERED"] = "1"
 
         cmd = [
-            sys.executable, "-u", "-m",
+            sys.executable,
+            "-u",
+            "-m",
             "tests.benchmarks.e2e.qwen_8b_seqlen",
-            "--phase", phase,
-            "--gpu", "0",  # always 0 since CUDA_VISIBLE_DEVICES remaps
-            "--output", output_file,
+            "--phase",
+            phase,
+            "--gpu",
+            "0",  # always 0 since CUDA_VISIBLE_DEVICES remaps
+            "--output",
+            output_file,
         ]
 
         log_fh = open(log_file, "w")
         proc = subprocess.Popen(
-            cmd, cwd=cwd, env=env,
-            stdout=log_fh, stderr=subprocess.STDOUT,
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
         )
         procs.append((phase, proc, log_fh))
         print(f"  Started {phase} (PID {proc.pid}) → GPU {gpu}")
 
     # Wait for all to finish, streaming status
-    print(f"\n  Waiting for all benchmarks to complete...")
+    print("\n  Waiting for all benchmarks to complete...")
     start = time.time()
 
     while any(p.poll() is None for _, p, _ in procs):
@@ -379,14 +382,12 @@ def run_parallel(gpus: List[int]):
                 pass
 
     # Load results
-    all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]] = {}
+    all_results: dict[str, dict[int, E2EBenchmarkResult | None]] = {}
     for phase, output_file in zip(phases, output_files):
         try:
             with open(output_file) as f:
                 raw = json.load(f)
-            all_results[phase] = {
-                int(k): dict_to_result(v) for k, v in raw.items()
-            }
+            all_results[phase] = {int(k): dict_to_result(v) for k, v in raw.items()}
         except FileNotFoundError:
             print(f"  ⚠ No results for {phase} (file not found)")
             all_results[phase] = {sl: None for sl in SEQ_LENS}
@@ -403,25 +404,30 @@ def run_sequential():
     """Run all 3 phases sequentially on the current GPU."""
     config = make_qwen3_8b_config()
 
-    all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]] = {}
+    all_results: dict[str, dict[int, E2EBenchmarkResult | None]] = {}
 
     for phase_key, (name, setup_fn) in PHASES.items():
         print_header(f"PHASE: {name.upper()} (all sequence lengths)", 100)
 
-        results: Dict[int, Optional[E2EBenchmarkResult]] = {}
+        results: dict[int, E2EBenchmarkResult | None] = {}
         for seq_len in SEQ_LENS:
             print_header(f"{name} | seq_len={seq_len}", 100)
 
             if phase_key == "bastile":
                 import bastile
+
                 bastile.reset()
 
             results[seq_len] = run_benchmark(
-                name, config, setup_fn=setup_fn, seq_len=seq_len,
+                name,
+                config,
+                setup_fn=setup_fn,
+                seq_len=seq_len,
             )
 
             if phase_key == "bastile":
                 import bastile
+
                 bastile.reset()
 
         all_results[phase_key] = results
@@ -429,11 +435,7 @@ def run_sequential():
     return all_results
 
 
-# ============================================================================
-# Results printing
-# ============================================================================
-
-def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]]):
+def print_results(all_results: dict[str, dict[int, E2EBenchmarkResult | None]]):
     """Print combined results tables for all 3 configurations."""
 
     pytorch = all_results.get("pytorch", {})
@@ -487,7 +489,9 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
 
     # ── Peak Memory ──
     print_header("RESULTS — PEAK MEMORY (GB)", 110)
-    print(f"\n  {'seq_len':>10}  {'PyTorch':>14}  {'Liger':>14}  {'Bastile':>14}  {'Liger Saved':>14}  {'Bastile Saved':>16}")
+    print(
+        f"\n  {'seq_len':>10}  {'PyTorch':>14}  {'Liger':>14}  {'Bastile':>14}  {'Liger Saved':>14}  {'Bastile Saved':>16}"
+    )
     print(f"  {'-' * 95}")
 
     for sl in SEQ_LENS:
@@ -533,22 +537,154 @@ def print_results(all_results: Dict[str, Dict[int, Optional[E2EBenchmarkResult]]
     print("\n" + "=" * 110)
 
 
-# ============================================================================
-# Main entry point
-# ============================================================================
+def plot_results(
+    all_results: dict[str, dict[int, E2EBenchmarkResult | None]],
+    assets_dir: str | None = None,
+):
+    """Generate bar charts for throughput, latency, and memory, saving to assets/."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("\n  matplotlib not installed — skipping chart generation")
+        return
+
+    if assets_dir is None:
+        assets_dir = str(Path(__file__).resolve().parents[3] / "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+
+    pytorch = all_results.get("pytorch", {})
+    liger = all_results.get("liger", {})
+    bastile_res = all_results.get("bastile", {})
+
+    configs = [
+        ("PyTorch", pytorch, "#EE4C2C"),
+        ("Liger", liger, "#0077B5"),
+        ("Bastile", bastile_res, "#5CE97E"),
+    ]
+
+    # Collect seq_lens that have at least one result
+    active_seq_lens = [sl for sl in SEQ_LENS if any(cfg_data.get(sl) is not None for _, cfg_data, _ in configs)]
+    if not active_seq_lens:
+        print("\n  No results to plot")
+        return
+
+    x = np.arange(len(active_seq_lens))
+    width = 0.25
+
+    def _bar_chart(
+        title: str,
+        ylabel: str,
+        filename: str,
+        get_val,
+        fmt_val=None,
+        higher_is_better: bool = True,
+    ):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        fig.patch.set_facecolor("#FAFAFA")
+        ax.set_facecolor("#FAFAFA")
+
+        for i, (name, data, color) in enumerate(configs):
+            vals = []
+            for sl in active_seq_lens:
+                r = data.get(sl)
+                vals.append(get_val(r) if r is not None else 0)
+            bars = ax.bar(
+                x + (i - 1) * width, vals, width, label=name, color=color, edgecolor="white", linewidth=0.5, zorder=3
+            )
+            # Add value labels on bars
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    label = fmt_val(v) if fmt_val else f"{v:.1f}"
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height(),
+                        label,
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                        color="#333",
+                    )
+
+        ax.set_xlabel("Sequence Length", fontsize=11, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(sl) for sl in active_seq_lens])
+        ax.legend(frameon=True, fancybox=True, shadow=False, fontsize=10)
+        ax.grid(axis="y", alpha=0.3, zorder=0)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        # Mark OOM entries
+        for i, (name, data, color) in enumerate(configs):
+            for j, sl in enumerate(active_seq_lens):
+                if data.get(sl) is None:
+                    ax.text(
+                        x[j] + (i - 1) * width,
+                        0,
+                        "OOM",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        color="red",
+                        fontweight="bold",
+                        rotation=90,
+                    )
+
+        fig.tight_layout()
+        out_path = os.path.join(assets_dir, filename)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {out_path}")
+
+    print(f"\n  Generating charts → {assets_dir}/")
+
+    _bar_chart(
+        title="Qwen3-8B E2E Training — Throughput (tokens/sec)",
+        ylabel="Tokens / sec",
+        filename="bench_8b_throughput.png",
+        get_val=lambda r: r.tokens_per_sec,
+        fmt_val=lambda v: f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}",
+        higher_is_better=True,
+    )
+
+    _bar_chart(
+        title="Qwen3-8B E2E Training — Latency (ms / iteration)",
+        ylabel="ms / iteration",
+        filename="bench_8b_latency.png",
+        get_val=lambda r: r.avg_iter_ms,
+        fmt_val=lambda v: f"{v:.0f}" if v >= 10 else f"{v:.1f}",
+        higher_is_better=False,
+    )
+
+    _bar_chart(
+        title="Qwen3-8B E2E Training — Peak GPU Memory (GB)",
+        ylabel="Peak Memory (GB)",
+        filename="bench_8b_memory.png",
+        get_val=lambda r: r.peak_memory_gb,
+        fmt_val=lambda v: f"{v:.1f}",
+        higher_is_better=False,
+    )
+
+    print("  Done!")
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=["pytorch", "liger", "bastile"],
-                        help="Run a single phase (used by subprocess)")
-    parser.add_argument("--gpu", type=int, default=0,
-                        help="GPU index (used with --phase)")
-    parser.add_argument("--output", type=str, default="",
-                        help="Output JSON file (used with --phase)")
-    parser.add_argument("--gpus", type=str, default="0,1,2",
-                        help="Comma-separated GPU indices for parallel run (default: 0,1,2)")
-    parser.add_argument("--sequential", action="store_true",
-                        help="Run sequentially on current GPU instead of parallel")
+    parser.add_argument(
+        "--phase", choices=["pytorch", "liger", "bastile"], help="Run a single phase (used by subprocess)"
+    )
+    parser.add_argument("--gpu", type=int, default=0, help="GPU index (used with --phase)")
+    parser.add_argument("--output", type=str, default="", help="Output JSON file (used with --phase)")
+    parser.add_argument(
+        "--gpus", type=str, default="0,1,2", help="Comma-separated GPU indices for parallel run (default: 0,1,2)"
+    )
+    parser.add_argument("--sequential", action="store_true", help="Run sequentially on current GPU instead of parallel")
     args = parser.parse_args()
 
     # Single-phase mode (called by subprocess)
@@ -564,7 +700,7 @@ def main():
     print(f"\n  Model: Qwen3-8B (36 layers, 4096 hidden, 32 heads), batch_size={BATCH_SIZE}")
     print(f"  Warmup: {WARMUP_ITERS} iters, Duration: {DURATION_SEC}s per run")
     print(f"  Sequence lengths: {SEQ_LENS}")
-    print(f"  No pretrained weights — random init only")
+    print("  No pretrained weights — random init only")
 
     num_gpus = torch.cuda.device_count()
     print(f"\n  Available GPUs: {num_gpus}")
@@ -574,7 +710,7 @@ def main():
     if args.sequential or num_gpus < 3:
         if num_gpus < 3 and not args.sequential:
             print(f"\n  Only {num_gpus} GPU(s) available — falling back to sequential mode")
-        print(f"\n  Mode: SEQUENTIAL (single GPU)")
+        print("\n  Mode: SEQUENTIAL (single GPU)")
         print_gpu_info()
         all_results = run_sequential()
     else:
@@ -583,6 +719,7 @@ def main():
         all_results = run_parallel(gpus)
 
     print_results(all_results)
+    plot_results(all_results)
 
 
 if __name__ == "__main__":

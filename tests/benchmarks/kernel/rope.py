@@ -7,16 +7,16 @@ Note: Liger RoPE expects (bsz, n_head, seq_len, head_dim) format and
 cos/sin with shape (1, seq_len, head_dim) or (bsz, seq_len, head_dim).
 """
 
-import torch
 from dataclasses import dataclass
-from typing import Tuple
+
+import torch
 
 from ..utils import (
     benchmark_fn,
     clear_cuda_state,
-    print_header,
-    print_gpu_info,
     format_speedup,
+    print_gpu_info,
+    print_header,
 )
 
 
@@ -29,11 +29,11 @@ class RoPEConfig:
     dtype: torch.dtype
 
     @property
-    def shape(self) -> Tuple[int, int, int, int]:
+    def shape(self) -> tuple[int, int, int, int]:
         return (self.batch_size, self.num_heads, self.seq_len, self.head_dim)
 
     def __str__(self) -> str:
-        dtype_str = str(self.dtype).split('.')[-1]
+        dtype_str = str(self.dtype).split(".")[-1]
         return f"B{self.batch_size}_H{self.num_heads}_S{self.seq_len}_D{self.head_dim} {dtype_str}"
 
 
@@ -60,20 +60,20 @@ def run_single_benchmark(config: RoPEConfig, bastile_rope, liger_rope) -> dict:
     # Shape: (bsz, n_head, seq_len, head_dim)
     q = torch.randn(*config.shape, device="cuda", dtype=config.dtype)
     k = torch.randn(*config.shape, device="cuda", dtype=config.dtype)
-    
+
     # HuggingFace format: (batch, seq_len, head_dim)
     cos = torch.randn(config.batch_size, config.seq_len, config.head_dim, device="cuda", dtype=config.dtype)
     sin = torch.randn(config.batch_size, config.seq_len, config.head_dim, device="cuda", dtype=config.dtype)
 
     pytorch_latency = benchmark_fn(lambda: pytorch_rope(q, k, cos, sin))
     bastile_latency = benchmark_fn(lambda: bastile_rope(q, k, cos, sin))
-    
+
     # Liger expects cos/sin with shape that broadcasts correctly
     # For Liger: q, k are (bsz, n_head, seq_len, head_dim)
     # cos/sin should be (bsz, seq_len, head_dim // 2) for the half-rotation
-    cos_liger = cos[..., :config.head_dim // 2].contiguous()
-    sin_liger = sin[..., :config.head_dim // 2].contiguous()
-    
+    cos_liger = cos[..., : config.head_dim // 2].contiguous()
+    sin_liger = sin[..., : config.head_dim // 2].contiguous()
+
     try:
         liger_latency = benchmark_fn(lambda: liger_rope(q.clone(), k.clone(), cos_liger, sin_liger))
     except Exception:
@@ -88,9 +88,10 @@ def run_single_benchmark(config: RoPEConfig, bastile_rope, liger_rope) -> dict:
 
 
 def main():
-    from bastile.ops.rope import apply_rotary_pos_emb as bastile_rope
     from liger_kernel.ops import LigerRopeFunction
-    
+
+    from bastile.ops.rope import apply_rotary_pos_emb as bastile_rope
+
     def liger_rope(q, k, cos, sin):
         return LigerRopeFunction.apply(q, k, cos, sin)
 
@@ -100,7 +101,7 @@ def main():
 
     print_gpu_info()
     print()
-    
+
     configs = [
         RoPEConfig(1, 32, 512, 128, torch.float16),
         RoPEConfig(4, 32, 512, 128, torch.float16),
@@ -117,55 +118,57 @@ def main():
     print("-" * 100)
 
     all_results = []
-    
+
     for config in configs:
         try:
             result = run_single_benchmark(config, bastile_rope, liger_rope)
             all_results.append(result)
-            
+
             py = result["pytorch"]
             lg = result["liger"]
             ba = result["bastile"]
-            
+
             speedup_vs_py = py / ba
             speedup_vs_lg = lg / ba
-            
-            print(f"{str(config):<45} {py:>8.1f}us {lg:>8.1f}us {ba:>8.1f}us "
-                  f"{format_speedup(speedup_vs_py):>10} {format_speedup(speedup_vs_lg):>10}")
+
+            print(
+                f"{config!s:<45} {py:>8.1f}us {lg:>8.1f}us {ba:>8.1f}us "
+                f"{format_speedup(speedup_vs_py):>10} {format_speedup(speedup_vs_lg):>10}"
+            )
         except Exception as e:
-            print(f"{str(config):<45} ERROR: {e}")
+            print(f"{config!s:<45} ERROR: {e}")
 
     # Summary
     print_header("SUMMARY", 100)
-    
+
     if all_results:
         bastile_vs_pytorch = [r["pytorch"] / r["bastile"] for r in all_results]
         bastile_vs_liger = [r["liger"] / r["bastile"] for r in all_results]
         liger_vs_pytorch = [r["pytorch"] / r["liger"] for r in all_results]
-        
-        print(f"\nBastile vs PyTorch:")
-        print(f"  Average Speedup: {sum(bastile_vs_pytorch)/len(bastile_vs_pytorch):.2f}x")
+
+        print("\nBastile vs PyTorch:")
+        print(f"  Average Speedup: {sum(bastile_vs_pytorch) / len(bastile_vs_pytorch):.2f}x")
         print(f"  Max Speedup:     {max(bastile_vs_pytorch):.2f}x")
         print(f"  Min Speedup:     {min(bastile_vs_pytorch):.2f}x")
-        
-        print(f"\nLiger vs PyTorch:")
-        print(f"  Average Speedup: {sum(liger_vs_pytorch)/len(liger_vs_pytorch):.2f}x")
+
+        print("\nLiger vs PyTorch:")
+        print(f"  Average Speedup: {sum(liger_vs_pytorch) / len(liger_vs_pytorch):.2f}x")
         print(f"  Max Speedup:     {max(liger_vs_pytorch):.2f}x")
         print(f"  Min Speedup:     {min(liger_vs_pytorch):.2f}x")
-        
-        print(f"\nBastile vs Liger:")
-        print(f"  Average Speedup: {sum(bastile_vs_liger)/len(bastile_vs_liger):.2f}x")
+
+        print("\nBastile vs Liger:")
+        print(f"  Average Speedup: {sum(bastile_vs_liger) / len(bastile_vs_liger):.2f}x")
         print(f"  Max Speedup:     {max(bastile_vs_liger):.2f}x")
         print(f"  Min Speedup:     {min(bastile_vs_liger):.2f}x")
-        
-        avg_vs_liger = sum(bastile_vs_liger)/len(bastile_vs_liger)
+
+        avg_vs_liger = sum(bastile_vs_liger) / len(bastile_vs_liger)
         if avg_vs_liger >= 1.0:
             print(f"\n  Result: Bastile RoPE is {(avg_vs_liger - 1) * 100:.1f}% FASTER than Liger Kernel")
         else:
             print(f"\n  Result: Bastile RoPE is {(1 - avg_vs_liger) * 100:.1f}% SLOWER than Liger Kernel")
-        
-        print("\n  Note: Bastile RoPE uses CuTile kernel with autotuning; Liger uses Triton kernel.")
-    
+
+        print("\n  Note: Bastile RoPE uses CuTile kernel; Liger uses Triton kernel.")
+
     print("\n" + "=" * 100)
 
 

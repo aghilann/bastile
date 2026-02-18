@@ -1,123 +1,192 @@
-"""
-Bastile RMSNorm - Fast cuteDSL implementation via quack.
+"""CuTile RMSNorm — persistent kernels for forward and backward."""
 
-Wraps quack's RMSNorm with reduced CPU dispatch overhead by:
-1. Directly invoking compiled CuTe DSL kernels (bypasses torch.library.custom_op dispatch)
-2. Caching device properties (sm_count)
-3. Minimizing Python overhead on the hot path (no assertions, no repeated lookups)
-
-The compiled GPU kernels are identical to quack's - only the Python dispatch path is faster.
-"""
-
+import cuda.tile as ct
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple
 
 from ..registry import register_patch
-from quack.rmsnorm import (
-    rmsnorm as quack_rmsnorm,
-    _rmsnorm_fwd,
-    _rmsnorm_bwd,
-    _get_sm_count,
-)
-from quack.cute_dsl_utils import torch2cute_dtype_map
+from .utils import get_sm_count, next_power_of_2
 
-_sm_count_cache: Dict[Tuple[int, torch.device], int] = {}
+ConstInt = ct.Constant[int]
+ConstFloat = ct.Constant[float]
+PAD_ZERO = ct.PaddingMode.ZERO
 
 
-def _cached_sm_count(N: int, device: torch.device) -> int:
-    key = (N, device)
-    if key not in _sm_count_cache:
-        _sm_count_cache[key] = _get_sm_count(N, device)
-    return _sm_count_cache[key]
+@ct.kernel(occupancy=1)
+def _rms_fwd(X, W, Y, Rstd, TILE_M: ConstInt, TILE_N: ConstInt, eps: ConstFloat):
+    bid = ct.bid(0)
+    M, N = X.shape[0], X.shape[1]
+    blocks = ct.num_blocks(0)
+    upper = (M + TILE_M - 1) // TILE_M
+
+    w = ct.astype(ct.load(W, index=(0,), shape=(TILE_N,), padding_mode=PAD_ZERO), ct.float32)
+    w = ct.reshape(w, (1, TILE_N))
+    rcp = ct.full((TILE_M, 1), 1.0 / N, dtype=ct.float32)
+    e = ct.full((TILE_M, 1), eps, dtype=ct.float32)
+
+    for i in range(bid, upper, blocks):
+        x = ct.astype(
+            ct.load(X, index=(i, 0), shape=(TILE_M, TILE_N), latency=10, padding_mode=PAD_ZERO),
+            ct.float32,
+        )
+        r = ct.rsqrt(ct.sum(x * x, axis=1, keepdims=True) * rcp + e)
+        ct.store(Rstd, index=(i,), tile=ct.reshape(r, (TILE_M,)), allow_tma=False)
+        ct.store(Y, index=(i, 0), tile=ct.astype(x * r * w, X.dtype), allow_tma=False, latency=3)
 
 
-_fwd_cache = _rmsnorm_fwd.compile_cache
-_bwd_cache = _rmsnorm_bwd.compile_cache
+@ct.kernel(occupancy=1)
+def _rms_bwd(dx, dy, x, weight, Rstd, dw_partial, TILE_M: ConstInt, TILE_N: ConstInt):
+    bid = ct.bid(0)
+    M, N = x.shape[0], x.shape[1]
+    blocks = ct.num_blocks(0)
+    upper = (M + TILE_M - 1) // TILE_M
+
+    w = ct.astype(ct.load(weight, index=(0,), shape=(TILE_N,), padding_mode=PAD_ZERO), ct.float32)
+    w = ct.reshape(w, (1, TILE_N))
+    rcp = ct.full((TILE_M, 1), 1.0 / N, dtype=ct.float32)
+    dw_acc = ct.full((1, TILE_N), 0.0, dtype=ct.float32)
+
+    for i in range(bid, upper, blocks):
+        xt = ct.astype(
+            ct.load(x, index=(i, 0), shape=(TILE_M, TILE_N), padding_mode=PAD_ZERO, latency=10),
+            ct.float32,
+        )
+        dyt = ct.astype(
+            ct.load(dy, index=(i, 0), shape=(TILE_M, TILE_N), padding_mode=PAD_ZERO, latency=10),
+            ct.float32,
+        )
+        r = ct.reshape(
+            ct.load(Rstd, index=(i,), shape=(TILE_M,), padding_mode=PAD_ZERO),
+            (TILE_M, 1),
+        )
+        xhat = xt * r
+        wdy = dyt * w
+        c = ct.sum(xhat * wdy, axis=1, keepdims=True) * rcp
+        ct.store(dx, index=(i, 0), tile=ct.astype((wdy - xhat * c) * r, dx.dtype), allow_tma=False, latency=3)
+        dw_acc = dw_acc + ct.sum(dyt * xhat, axis=0, keepdims=True)
+
+    ct.store(dw_partial, index=(bid, 0), tile=dw_acc, allow_tma=False)
 
 
-class FastRMSNormFunction(torch.autograd.Function):
+_fwd_cfg: dict = {}  # (M, N, dtype) -> (tile_m, tile_n, grid)
+_bwd_cfg: dict = {}  # (M, N) -> (tile_m, tile_n, grid, N)
+
+
+def _fwd_tiles(M, N):
+    sms = get_sm_count()
+    T = next_power_of_2(N)
+    if sms * 4 >= M:
+        return (1, T, min(sms, M))
+    if T <= 1024:
+        tm = 16
+    elif T >= 16384:
+        tm = 2
+    else:
+        tm = max(2, min(8, 32768 // T))
+    return (tm, T, min(sms, (M + tm - 1) // tm))
+
+
+def _bwd_tiles(M, N):
+    T = next_power_of_2(N)
+    if T > 4096:
+        tm = 1
+    elif T <= 2048 or (M >= 8192 and T <= 4096):
+        tm = 4
+    else:
+        tm = 1
+    sms = get_sm_count()
+    tiles = (M + tm - 1) // tm
+    g = min(sms, tiles)
+    if tiles <= 64:
+        g = min(g, 32)
+    return (tm, T, g, N)
+
+
+class CuTileRMSNormFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, hidden_states, weight, eps):
-        x_shape_og = hidden_states.shape
-        x = hidden_states.reshape(-1, hidden_states.shape[-1])
-        out = torch.empty_like(x)
-        rstd = torch.empty(x.shape[0], device=x.device, dtype=torch.float32)
+    def forward(ctx, x, weight, eps):
+        shape = x.shape
+        N = shape[-1]
+        x2 = x.reshape(-1, N)
+        M = x2.shape[0]
 
-        N = x.shape[1]
-        dtype = torch2cute_dtype_map[x.dtype]
-        w_dtype = torch2cute_dtype_map[weight.dtype]
-        fwd_key = (dtype, dtype, None, w_dtype, None, None, N, True, False, False)
+        cfg = _fwd_cfg.get((M, N, x.dtype))
+        if cfg is None:
+            cfg = _fwd_tiles(M, N)
+            _fwd_cfg[(M, N, x.dtype)] = cfg
+        tm, tn, g = cfg
 
-        kernel = _fwd_cache.get(fwd_key)
-        if kernel is not None:
-            kernel(x, weight, None, None, out, None, rstd, None, eps)
-        else:
-            _rmsnorm_fwd(x, weight, out, None, rstd, None, None, None, eps, False)
+        stream = torch.cuda.current_stream()
+        y = torch.empty_like(x2)
+        rstd = torch.empty(M, dtype=torch.float32, device=x.device)
+        ct.launch(stream, (g,), _rms_fwd, (x2, weight, y, rstd, tm, tn, eps))
 
         ctx.save_for_backward(x, weight, rstd)
-        ctx.x_shape_og = x_shape_og
-        return out.reshape(x_shape_og)
+        ctx.eps = eps
+        return y.view(shape)
 
     @staticmethod
-    def backward(ctx, dout):
+    def backward(ctx, dy):
         x, weight, rstd = ctx.saved_tensors
-        x_shape_og = ctx.x_shape_og
-        N = x.shape[1]
-        dout = dout.reshape(-1, dout.shape[-1])
-        dx = torch.empty_like(x)
-        device = x.device
-        sm_count = _cached_sm_count(N, device)
-        dw_partial = torch.empty(sm_count, N, device=device, dtype=torch.float32)
+        shape = x.shape
+        N = shape[-1]
+        x2 = x.reshape(-1, N)
+        M = x2.shape[0]
+        dy2 = dy.reshape(-1, N)
+        if not dy2.is_contiguous():
+            dy2 = dy2.contiguous()
 
-        dtype = torch2cute_dtype_map[x.dtype]
-        w_dtype = torch2cute_dtype_map[weight.dtype]
-        bwd_key = (N, dtype, dtype, dtype, w_dtype, False, None, None)
+        cfg = _bwd_cfg.get((M, N))
+        if cfg is None:
+            cfg = _bwd_tiles(M, N)
+            _bwd_cfg[(M, N)] = cfg
+        tm, T, g, No = cfg
 
-        kernel = _bwd_cache.get(bwd_key)
-        if kernel is not None:
-            kernel(x, weight, dout, None, rstd, dx, dw_partial, None, None, sm_count)
-        else:
-            _rmsnorm_bwd(x, weight, dout, rstd, dx, dw_partial, None, None, None, sm_count)
+        stream = torch.cuda.current_stream()
+        dx = torch.empty_like(x2)
+        dwp = torch.empty((g, T), device=x.device, dtype=torch.float32)
+        ct.launch(stream, (g,), _rms_bwd, (dx, dy2, x2, weight, rstd, dwp, tm, T))
 
-        dw = dw_partial.sum(dim=0).to(weight.dtype)
-        return dx.view(x_shape_og), dw, None
+        dw = dwp.sum(0)
+        if No != T:
+            dw = dw[:No]
+        return dx.view(shape), dw.to(weight.dtype), None
 
 
-class FastCuteDSLRMSNorm(nn.Module):
+class CuTileRMSNorm(nn.Module):
+    """Drop-in RMSNorm using cuTILE persistent kernels."""
+
     def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return FastRMSNormFunction.apply(
-            hidden_states, self.weight, self.variance_epsilon
-        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return CuTileRMSNormFunction.apply(x, self.weight, self.variance_epsilon)
 
     def extra_repr(self) -> str:
         return f"{self.weight.shape[0]}, eps={self.variance_epsilon}"
 
 
-def warmup_rmsnorm(
-    hidden_size: int,
-    dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
-):
+def rms_norm(x, weight, eps=1e-6, **_kw):
+    """Standalone cuTILE RMSNorm."""
+    return CuTileRMSNormFunction.apply(x, weight, eps)
+
+
+def warmup_rms_norm(hidden_size: int, dtype=torch.bfloat16, device="cuda"):
+    """JIT-compile kernels for *hidden_size*."""
     x = torch.randn(2, hidden_size, dtype=dtype, device=device, requires_grad=True)
     w = torch.ones(hidden_size, dtype=dtype, device=device, requires_grad=True)
-    out = quack_rmsnorm(x, w, eps=1e-6)
-    out.sum().backward()
-    _cached_sm_count(hidden_size, torch.device(device))
+    rms_norm(x, w, 1e-6).sum().backward()
     torch.cuda.synchronize()
 
 
 register_patch(
     name="rms_norm_qwen3",
-    description="Fast cuteDSL RMSNorm for Qwen3 (reduced CPU dispatch overhead)",
+    description="CuTile RMSNorm for Qwen3 (persistent fwd + persistent bwd)",
     target_module="transformers.models.qwen3.modeling_qwen3",
     target_attr="Qwen3RMSNorm",
-    replacement=FastCuteDSLRMSNorm,
+    replacement=CuTileRMSNorm,
     has_backward=True,
     priority=10,
     models=["qwen3"],

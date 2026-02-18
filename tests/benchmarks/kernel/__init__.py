@@ -3,15 +3,14 @@ Kernel benchmarks - individual kernel performance vs PyTorch.
 
 Benchmarks:
 - rms_norm: RMSNorm kernel
-- swiglu: SwiGLU activation kernel  
+- swiglu: SwiGLU activation kernel
 - rope: Rotary Position Embedding
-- geglu: GEGLU activation (GPT-OSS MoE)
+- bench_fused_lce: Fused Linear Cross-Entropy
 """
 
 from .rms_norm import main as benchmark_rms_norm
-from .swiglu import main as benchmark_swiglu
 from .rope import main as benchmark_rope
-from .geglu import main as benchmark_geglu
+from .swiglu import main as benchmark_swiglu
 
 
 def run_all():
@@ -19,12 +18,11 @@ def run_all():
     print("=" * 80)
     print("Running All Kernel Benchmarks")
     print("=" * 80)
-    
+
     benchmark_rms_norm()
     benchmark_swiglu()
     benchmark_rope()
-    benchmark_geglu()
-    
+
     print("\n" + "=" * 80)
     print("All kernel benchmarks complete!")
     print("=" * 80)
@@ -32,8 +30,7 @@ def run_all():
 
 __all__ = [
     "benchmark_rms_norm",
-    "benchmark_swiglu", 
     "benchmark_rope",
-    "benchmark_geglu",
+    "benchmark_swiglu",
     "run_all",
 ]

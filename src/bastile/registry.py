@@ -8,9 +8,9 @@ Each patch is registered with:
 - Whether backward pass is supported
 """
 
-from dataclasses import dataclass, field
-from typing import Callable, Any, Dict, List, Optional
 import logging
+from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -18,25 +18,26 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PatchInfo:
     """Information about a registered patch."""
+
     name: str
     description: str
     target_module: str  # e.g., "transformers.models.llama.modeling_llama"
-    target_attr: str    # e.g., "LlamaRMSNorm"
-    replacement: Any    # The replacement class/function
+    target_attr: str  # e.g., "LlamaRMSNorm"
+    replacement: Any  # The replacement class/function
     has_backward: bool  # Whether backward pass is implemented
     original: Any = None  # Stores original for reset
     is_applied: bool = False
-    priority: int = 0   # Higher priority patches are applied first
-    models: List[str] = field(default_factory=list)  # Which model types this applies to
+    priority: int = 0  # Higher priority patches are applied first
+    models: list[str] = field(default_factory=list)  # Which model types this applies to
 
 
 class PatchRegistry:
     """Central registry for all kernel patches."""
-    
+
     def __init__(self):
-        self._patches: Dict[str, PatchInfo] = {}
-        self._applied: List[str] = []
-    
+        self._patches: dict[str, PatchInfo] = {}
+        self._applied: list[str] = []
+
     def register(
         self,
         name: str,
@@ -46,12 +47,12 @@ class PatchRegistry:
         replacement: Any,
         has_backward: bool = True,
         priority: int = 0,
-        models: Optional[List[str]] = None,
+        models: list[str] | None = None,
     ) -> None:
         """Register a new patch."""
         if name in self._patches:
             logger.warning(f"Patch '{name}' already registered, overwriting")
-        
+
         self._patches[name] = PatchInfo(
             name=name,
             description=description,
@@ -63,27 +64,27 @@ class PatchRegistry:
             models=models or [],
         )
         logger.debug(f"Registered patch: {name}")
-    
-    def get(self, name: str) -> Optional[PatchInfo]:
+
+    def get(self, name: str) -> PatchInfo | None:
         """Get a patch by name."""
         return self._patches.get(name)
-    
-    def list_all(self) -> List[str]:
+
+    def list_all(self) -> list[str]:
         """List all registered patch names."""
         return list(self._patches.keys())
-    
-    def list_with_backward(self) -> List[str]:
+
+    def list_with_backward(self) -> list[str]:
         """List patches that have backward pass support."""
         return [name for name, patch in self._patches.items() if patch.has_backward]
-    
-    def get_for_model(self, model_type: str) -> List[PatchInfo]:
+
+    def get_for_model(self, model_type: str) -> list[PatchInfo]:
         """Get patches applicable to a specific model type."""
         applicable = []
         for patch in self._patches.values():
             if not patch.models or model_type in patch.models:
                 applicable.append(patch)
         return sorted(applicable, key=lambda p: -p.priority)
-    
+
     def mark_applied(self, name: str, original: Any) -> None:
         """Mark a patch as applied and store the original."""
         if name in self._patches:
@@ -91,15 +92,15 @@ class PatchRegistry:
             self._patches[name].is_applied = True
             if name not in self._applied:
                 self._applied.append(name)
-    
+
     def mark_reset(self, name: str) -> None:
         """Mark a patch as reset."""
         if name in self._patches:
             self._patches[name].is_applied = False
             if name in self._applied:
                 self._applied.remove(name)
-    
-    def get_applied(self) -> List[str]:
+
+    def get_applied(self) -> list[str]:
         """Get list of currently applied patches."""
         return self._applied.copy()
 
@@ -116,7 +117,7 @@ def register_patch(
     replacement: Any,
     has_backward: bool = True,
     priority: int = 0,
-    models: Optional[List[str]] = None,
+    models: list[str] | None = None,
 ) -> None:
     """Register a patch in the global registry."""
     _registry.register(
@@ -131,7 +132,7 @@ def register_patch(
     )
 
 
-def list_patches() -> List[str]:
+def list_patches() -> list[str]:
     """List all registered patches."""
     return _registry.list_all()
 

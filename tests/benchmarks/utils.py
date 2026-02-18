@@ -4,16 +4,13 @@ Shared utilities for benchmarking.
 Common functions used across kernel and e2e benchmarks.
 """
 
-import torch
 import gc
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
 
+import torch
 
-# ============================================================================
-# GPU Utilities
-# ============================================================================
 
 def get_gpu_info() -> dict:
     """Get GPU information."""
@@ -30,13 +27,13 @@ def get_peak_bandwidth() -> float:
     """Get theoretical peak memory bandwidth for current GPU in GB/s."""
     props = torch.cuda.get_device_properties(0)
     name = props.name.lower()
-    if 'b200' in name:
+    if "b200" in name:
         return 8000.0  # GB/s (B200 HBM3e)
-    elif 'h100' in name:
+    elif "h100" in name:
         return 3350.0
-    elif 'a100' in name:
+    elif "a100" in name:
         return 2000.0
-    elif '4090' in name:
+    elif "4090" in name:
         return 1000.0
     else:
         return 1000.0
@@ -59,10 +56,6 @@ def get_peak_memory_gb() -> float:
     return torch.cuda.max_memory_allocated() / 1024**3
 
 
-# ============================================================================
-# Timing Utilities
-# ============================================================================
-
 def benchmark_fn(
     fn: Callable,
     warmup: int = 50,
@@ -70,12 +63,12 @@ def benchmark_fn(
 ) -> float:
     """
     Benchmark a function using CUDA events.
-    
+
     Args:
         fn: Function to benchmark
         warmup: Number of warmup iterations
         iterations: Number of timed iterations
-        
+
     Returns:
         Median latency in microseconds
     """
@@ -108,7 +101,7 @@ def benchmark_fn_with_stats(
 ) -> dict:
     """
     Benchmark a function and return detailed statistics.
-    
+
     Returns:
         Dict with median, mean, min, max, p95, p99 latencies in microseconds
     """
@@ -132,7 +125,7 @@ def benchmark_fn_with_stats(
 
     times.sort()
     n = len(times)
-    
+
     return {
         "median_us": times[n // 2],
         "mean_us": sum(times) / n,
@@ -145,32 +138,28 @@ def benchmark_fn_with_stats(
 
 class Timer:
     """Context manager for timing code blocks."""
-    
+
     def __init__(self):
         self.start_time = None
         self.end_time = None
-        
+
     def __enter__(self):
         torch.cuda.synchronize()
         self.start_time = time.perf_counter()
         return self
-        
+
     def __exit__(self, *args):
         torch.cuda.synchronize()
         self.end_time = time.perf_counter()
-        
+
     @property
     def elapsed_ms(self) -> float:
         return (self.end_time - self.start_time) * 1000
-    
+
     @property
     def elapsed_sec(self) -> float:
         return self.end_time - self.start_time
 
-
-# ============================================================================
-# Throughput Utilities
-# ============================================================================
 
 def compute_throughput_gbps(
     total_bytes: int,
@@ -182,7 +171,7 @@ def compute_throughput_gbps(
 
 def compute_bandwidth_utilization(
     throughput_gbps: float,
-    peak_bw_gbps: Optional[float] = None,
+    peak_bw_gbps: float | None = None,
 ) -> float:
     """Compute bandwidth utilization as percentage."""
     if peak_bw_gbps is None:
@@ -190,27 +179,25 @@ def compute_bandwidth_utilization(
     return (throughput_gbps / peak_bw_gbps) * 100
 
 
-# ============================================================================
-# Data Classes
-# ============================================================================
-
 @dataclass
 class KernelBenchmarkResult:
     """Result from a kernel benchmark."""
+
     config_str: str
     provider: str
     latency_us: float
-    throughput_gbps: Optional[float] = None
-    bandwidth_util_pct: Optional[float] = None
-    
+    throughput_gbps: float | None = None
+    bandwidth_util_pct: float | None = None
+
     def speedup_vs(self, other: "KernelBenchmarkResult") -> float:
         """Calculate speedup compared to another result."""
         return other.latency_us / self.latency_us
 
 
-@dataclass 
+@dataclass
 class E2EBenchmarkResult:
     """Result from an end-to-end training benchmark."""
+
     name: str
     iterations: int
     total_time_sec: float
@@ -219,20 +206,16 @@ class E2EBenchmarkResult:
     peak_memory_gb: float
     initial_loss: float
     final_loss: float
-    loss_history: Optional[List[float]] = None
-    
+    loss_history: list[float] | None = None
+
     def speedup_vs(self, other: "E2EBenchmarkResult") -> float:
         """Calculate speedup compared to another result."""
         return self.tokens_per_sec / other.tokens_per_sec
-    
+
     def memory_saved_vs(self, other: "E2EBenchmarkResult") -> float:
         """Calculate memory saved compared to another result in GB."""
         return other.peak_memory_gb - self.peak_memory_gb
 
-
-# ============================================================================
-# Printing Utilities
-# ============================================================================
 
 def print_header(title: str, width: int = 80):
     """Print a section header."""
@@ -254,37 +237,4 @@ def format_speedup(speedup: float) -> str:
     if speedup >= 1.0:
         return f"{speedup:.2f}x"
     else:
-        return f"{1/speedup:.2f}x slower"
-
-
-# ============================================================================
-# JIT Warmup
-# ============================================================================
-
-def jit_warmup_kernel(
-    kernel_fn: Callable,
-    input_generator: Callable,
-    configs: List[tuple],
-    num_warmup: int = 5,
-):
-    """
-    Generic JIT warmup for CuTile kernels.
-    
-    Args:
-        kernel_fn: The kernel function to warm up
-        input_generator: Function that takes config tuple and returns inputs
-        configs: List of config tuples
-        num_warmup: Number of warmup iterations per config
-    """
-    print("JIT compiling kernels...")
-    
-    for config in configs:
-        inputs = input_generator(config)
-        for _ in range(num_warmup):
-            if isinstance(inputs, tuple):
-                _ = kernel_fn(*inputs)
-            else:
-                _ = kernel_fn(inputs)
-        torch.cuda.synchronize()
-    
-    print("JIT compilation complete.\n")
+        return f"{1 / speedup:.2f}x slower"

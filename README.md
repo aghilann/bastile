@@ -1,6 +1,6 @@
 # Bastile
 
-Drop-in monkey-patch that replaces HuggingFace Qwen3 ops with optimized **CuTile** and **cuteDSL** kernels for training on NVIDIA Blackwell GPUs.
+Drop-in monkey-patch that replaces HuggingFace Qwen3 ops with optimized **CuTile** kernels for training on NVIDIA Blackwell GPUs.
 
 > **Requires**: NVIDIA Blackwell (B200 / B100) + CUDA Toolkit 13.1+
 
@@ -34,7 +34,7 @@ pip install bastile
 - PyTorch 2.4+ with CUDA support
 
 ```bash
-# Inside a CUDA 13.1 container (e.g. baseten/gpu-dev:v8-cu13_1):
+# Inside a CUDA 13.1 container:
 pip install bastile
 ```
 
@@ -58,10 +58,10 @@ Selective patching:
 
 ```python
 bastile.apply(
-    rms_norm=True,                   # cuteDSL RMSNorm (via quack)
+    rms_norm=True,                   # CuTile RMSNorm
     swiglu=True,                     # CuTile SwiGLU MLP
-    rope=True,                       # CuTile RoPE with autotuning
-    fused_linear_cross_entropy=True,  # Fused linear + CE (via quack)
+    rope=True,                       # CuTile RoPE
+    fused_linear_cross_entropy=True,  # CuTile fused linear + CE
 )
 ```
 
@@ -77,14 +77,14 @@ Bastile patches 4 operations in `transformers.models.qwen3.modeling_qwen3`. Each
 
 | Operation | Backend | Source | What it replaces |
 |---|---|---|---|
-| **RMSNorm** | cuteDSL (via [quack](https://github.com/pytorch-labs/quack)) | [`ops/rms_norm.py`](src/bastile/ops/rms_norm.py) | `Qwen3RMSNorm` |
-| **SwiGLU MLP** | CuTile (`cuda.tile`) | [`ops/swiglu.py`](src/bastile/ops/swiglu.py) | `Qwen3MLP` |
-| **RoPE** | CuTile (`cuda.tile`) | [`ops/rope.py`](src/bastile/ops/rope.py) | `apply_rotary_pos_emb` |
-| **Fused Linear Cross-Entropy** | cuteDSL (via [quack](https://github.com/pytorch-labs/quack)) | [`ops/fused_linear_cross_entropy.py`](src/bastile/ops/fused_linear_cross_entropy.py) | `Qwen3ForCausalLM.forward` |
+| **RMSNorm** | CuTile | [`ops/rms_norm.py`](src/bastile/ops/rms_norm.py) | `Qwen3RMSNorm` |
+| **SwiGLU MLP** | CuTile | [`ops/swiglu.py`](src/bastile/ops/swiglu.py) | `Qwen3MLP` |
+| **RoPE** | CuTile | [`ops/rope.py`](src/bastile/ops/rope.py) | `apply_rotary_pos_emb` |
+| **Fused Linear Cross-Entropy** | CuTile | [`ops/fused_linear_cross_entropy.py`](src/bastile/ops/fused_linear_cross_entropy.py) | `Qwen3ForCausalLM.forward` |
 
-### RMSNorm — cuteDSL
+### RMSNorm — CuTile
 
-Wraps quack's compiled cuteDSL kernels with reduced CPU dispatch overhead. Bypasses `torch.library.custom_op` dispatch by directly invoking the compiled kernel from a lookup cache, and caches SM counts to avoid repeated queries.
+Native CuTile RMSNorm with persistent forward and backward kernels. Uses gather/scatter memory access with SM-aware tile sizing.
 
 ```
 src/bastile/ops/rms_norm.py → patches Qwen3RMSNorm
@@ -100,15 +100,15 @@ src/bastile/ops/swiglu.py → patches Qwen3MLP
 
 ### RoPE — CuTile
 
-CuTile rotary position embedding with occupancy-based autotuning (tests occupancy 1, 2, 4, 8 and caches the best). In-place rotation on reshaped tensors to minimize memory traffic.
+CuTile rotary position embedding with compiler-optimized occupancy. In-place rotation on reshaped tensors to minimize memory traffic. Backward reuses the forward kernel by negating sin (inverse rotation identity).
 
 ```
 src/bastile/ops/rope.py → patches apply_rotary_pos_emb
 ```
 
-### Fused Linear Cross-Entropy — cuteDSL
+### Fused Linear Cross-Entropy — CuTile
 
-Replaces the standard `lm_head(hidden_states) → logits → cross_entropy(logits, labels)` pipeline with quack's `chunked_linear_cross_entropy`. This **never materializes the full logits tensor** (`[batch * seq, 151936]` for Qwen3), instead computing cross-entropy in chunks of 4096. This is the single biggest memory saver at long sequence lengths.
+Replaces the standard `lm_head(hidden_states) → logits → cross_entropy(logits, labels)` pipeline with a chunked approach. This **never materializes the full logits tensor** (`[batch * seq, 151936]` for Qwen3), instead computing cross-entropy in chunks. This is the single biggest memory saver at long sequence lengths.
 
 ```
 src/bastile/ops/fused_linear_cross_entropy.py → patches Qwen3ForCausalLM.forward
@@ -124,28 +124,29 @@ bastile.apply(rope=False)        # Patch everything except RoPE
 bastile.reset()                  # Restore original implementations
 bastile.get_patched_ops()        # List currently active patches
 bastile.warmup_all_kernels()     # Pre-compile kernels (avoids JIT lag)
-bastile.clear_autotune_cache()   # Re-run autotuning on next call
+bastile.clear_autotune_cache()   # Clear kernel caches
 ```
 
 ## Running Benchmarks
 
 ```bash
-# Small model comparison (HuggingFace vs Liger vs Bastile)
-make bench-small
-
 # Qwen3-8B sequence length sweep (parallel on 3 GPUs)
 make bench-8b
 
 # Qwen3-8B sweep (sequential, single GPU)
 make bench-8b-seq
 
-# Kernel profiling with torch.profiler
-make bench-profile
+# Qwen3-8B FSDP multi-GPU benchmark
+make bench-fsdp
+
+# Kernel micro-benchmarks
+make bench-rmsnorm
+make bench-lce
 ```
 
 ## Why CuTile instead of Triton?
 
-Bastile uses NVIDIA's [CuTile](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cuda-tile) (`cuda.tile`) and [cuteDSL](https://github.com/NVIDIA/cutlass) instead of Triton. On Blackwell (sm_100), CuTile generates native PTX through NVIDIA's own compiler toolchain, while Triton's code generation for sm_100 is still maturing. In our benchmarks, Triton-based kernels (Liger) often underperform raw PyTorch on B200, whereas CuTile kernels consistently match or beat it.
+Bastile uses NVIDIA's [CuTile](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cuda-tile) (`cuda.tile`) instead of Triton. On Blackwell (sm_100), CuTile generates native PTX through NVIDIA's own compiler toolchain, while Triton's code generation for sm_100 is still maturing. In our benchmarks, Triton-based kernels (Liger) often underperform raw PyTorch on B200, whereas CuTile kernels consistently match or beat it.
 
 ## License
 

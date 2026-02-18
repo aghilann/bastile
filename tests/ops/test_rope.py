@@ -10,20 +10,20 @@ import torch
 def test_forward_preserves_shape():
     """RoPE should preserve input shapes."""
     from bastile.ops.rope import apply_rotary_pos_emb
-    
+
     batch_size = 2
     num_heads = 8
     seq_len = 64
     head_dim = 64
-    
+
     q = torch.randn(batch_size, num_heads, seq_len, head_dim, device="cuda")
     k = torch.randn(batch_size, num_heads, seq_len, head_dim, device="cuda")
     # HuggingFace passes cos/sin with shape (batch, seq_len, head_dim)
     cos = torch.randn(batch_size, seq_len, head_dim, device="cuda")
     sin = torch.randn(batch_size, seq_len, head_dim, device="cuda")
-    
+
     q_out, k_out = apply_rotary_pos_emb(q, k, cos, sin)
-    
+
     assert q_out.shape == q.shape, f"Q shape mismatch: {q_out.shape} vs {q.shape}"
     assert k_out.shape == k.shape, f"K shape mismatch: {k_out.shape} vs {k.shape}"
     print("✓ RoPE preserves shapes")
@@ -41,21 +41,21 @@ def test_forward_values():
 def test_backward_produces_gradients():
     """RoPE should produce valid gradients."""
     from bastile.ops.rope import apply_rotary_pos_emb
-    
+
     batch_size = 2
     num_heads = 4
     seq_len = 32
     head_dim = 64
-    
+
     q = torch.randn(batch_size, num_heads, seq_len, head_dim, device="cuda", requires_grad=True)
     k = torch.randn(batch_size, num_heads, seq_len, head_dim, device="cuda", requires_grad=True)
     cos = torch.randn(batch_size, seq_len, head_dim, device="cuda")
     sin = torch.randn(batch_size, seq_len, head_dim, device="cuda")
-    
+
     q_out, k_out = apply_rotary_pos_emb(q, k, cos, sin)
     loss = q_out.sum() + k_out.sum()
     loss.backward()
-    
+
     assert q.grad is not None, "No Q gradient"
     assert k.grad is not None, "No K gradient"
     assert torch.isfinite(q.grad).all(), "Non-finite Q gradients"

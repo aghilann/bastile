@@ -71,27 +71,25 @@ def test_backward_matches_pytorch():
     print("✓ RMSNorm backward matches PyTorch")
 
 
-def test_static_persistent_mode():
-    """Test static persistent mode for large batches."""
+def test_large_batch_bf16():
+    """RMSNorm should handle large batches in bfloat16."""
     from bastile.ops.rms_norm import rms_norm
 
     hidden_size = 2048
     eps = 1e-6
-    batch_size = 128  # Large batch to trigger static persistent
+    batch_size = 128
 
     x = torch.randn(batch_size, hidden_size, device="cuda", dtype=torch.bfloat16)
     weight = torch.ones(hidden_size, device="cuda", dtype=torch.bfloat16)
 
-    # Force static persistent mode
-    output = rms_norm(x, weight, eps=eps, use_static_persistent=True)
+    output = rms_norm(x, weight, eps=eps)
 
-    # Reference
     variance = x.float().pow(2).mean(-1, keepdim=True)
     x_normed_ref = x.float() * torch.rsqrt(variance + eps)
     output_ref = (weight.float() * x_normed_ref).to(x.dtype)
 
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-2)
-    print("✓ RMSNorm static persistent mode works")
+    print("✓ RMSNorm large batch bf16 works")
 
 
 def run_all():
@@ -100,7 +98,7 @@ def run_all():
     print("=" * 60)
     test_forward_matches_pytorch()
     test_backward_matches_pytorch()
-    test_static_persistent_mode()
+    test_large_batch_bf16()
     print("✓ All RMSNorm tests passed\n")
 
 

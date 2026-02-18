@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    { name = "Aghilan", email = "aghilan@example.com" }
+    { name = "Aghilan", email = "aghilann7@gmail.com" }
 ]
 keywords = ["pytorch", "cuda", "cutile", "optimization", "training", "finetuning"]
 classifiers = [
@@ -19,8 +19,6 @@ classifiers = [
 
 dependencies = [
     "torch>=2.4.0",
-    "nvidia-cutlass>=4.2.0.0",
-    "nvidia-cutlass-dsl>=4.3.5",
     "transformers>=4.40.0",
 ]
 
@@ -29,6 +27,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-benchmark>=4.0.0",
     "liger-kernel>=0.5.0",
+    "ruff>=0.15.0",
 ]
 bench = [
     "matplotlib>=3.8.0",
@@ -54,5 +53,56 @@ include = ["src/bastile"]
 path = "src/bastile/__init__.py"
 
 [tool.uv]
-# PyTorch with CUDA 12.8 for CuTile support
-extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E402",   # module-level import not at top (benchmark scripts need setup first)
+    "B905",   # zip without strict= (too noisy)
+    "B023",   # function def in loop doesn't bind variable (benchmark closures are fine)
+    "SIM105", # contextlib.suppress (less readable for simple cases)
+    "SIM108", # ternary operator (readability tradeoff)
+    "RUF002", # ambiguous unicode in docstring (math symbols are intentional)
+    "RUF003", # ambiguous unicode in comment (math symbols are intentional)
+    "RUF005", # tuple concatenation (matches HuggingFace return style)
+    "RUF012", # mutable class variable (dataclass pattern)
+    "RUF059", # unused unpacked variables (common in shape destructuring)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/benchmarks/**" = ["F821", "E741", "B007", "SIM115"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bastile"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
