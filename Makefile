@@ -1,7 +1,7 @@
 # export LD_LIBRARY_PATH := /usr/local/cuda-13.0/compat:/usr/lib/x86_64-linux-gnu:$(LD_LIBRARY_PATH)
 export CUDA_VISIBLE_DEVICES ?= 2
 
-.PHONY: bench-8b bench-8b-seq bench-fsdp bench-rmsnorm bench-lce bench-all test lint fmt
+.PHONY: bench-8b bench-8b-seq bench-06b bench-0.6b bench-06b-seq bench-fsdp bench-rmsnorm bench-lce bench-all test lint fmt
 
 # Qwen3-8B seq length sweep: PyTorch vs Liger vs Bastile (parallel on 3 GPUs)
 bench-8b:
@@ -10,6 +10,14 @@ bench-8b:
 # Qwen3-8B seq length sweep: PyTorch vs Liger vs Bastile (sequential, 1 GPU)
 bench-8b-seq:
 	uv run python3 -u -m tests.benchmarks.e2e.qwen_8b_seqlen --sequential
+
+# Qwen3-0.6B pretrained seq length sweep: PyTorch vs Liger vs Bastile (parallel on 3 GPUs)
+bench-06b bench-0.6b:
+	uv run python3 -u -m tests.benchmarks.e2e.qwen_06b_seqlen
+
+# Qwen3-0.6B pretrained seq length sweep: PyTorch vs Liger vs Bastile (sequential, 1 GPU)
+bench-06b-seq:
+	uv run python3 -u -m tests.benchmarks.e2e.qwen_06b_seqlen --sequential
 
 # Qwen3-8B FSDP multi-GPU benchmark
 bench-fsdp:

@@ -26,6 +26,8 @@ EXCLUDED_NAMES = {
 }
 
 app = modal.App(APP_NAME)
+
+# This is evaluated on your local machine at deploy/build time.
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
@@ -36,15 +38,10 @@ def _ignore_path(path: Path) -> bool:
     return p.name.endswith(".egg-info")
 
 
-def _must_exist(p: Path) -> Path:
-    if not p.exists():
-        raise FileNotFoundError(f"Expected file not found: {p}")
-    return p
-
-
-PYPROJECT = _must_exist(PROJECT_ROOT / "pyproject.toml")
-UV_LOCK = _must_exist(PROJECT_ROOT / "uv.lock")
-README = PROJECT_ROOT / "README.md"  # optional, but needed if pyproject declares it
+# Local files (Modal reads these from your machine when building the image)
+pyproject_local = PROJECT_ROOT / "pyproject.toml"
+uv_lock_local = PROJECT_ROOT / "uv.lock"
+readme_local = PROJECT_ROOT / "README.md"  # optional
 
 image = (
     modal.Image.from_registry(CUDA_BASE, add_python="3.12")
@@ -52,14 +49,18 @@ image = (
         "apt-get update && apt-get install -y --no-install-recommends bash make git && rm -rf /var/lib/apt/lists/*",
         "python -m pip install -U pip uv",
     )
-    .add_local_file(str(PYPROJECT), f"{REMOTE_PROJECT_DIR}/pyproject.toml", copy=True)
-    .add_local_file(str(UV_LOCK), f"{REMOTE_PROJECT_DIR}/uv.lock", copy=True)
-    # If your pyproject.toml declares readme="README.md", hatchling requires it at build time.
-    .add_local_file(str(README), f"{REMOTE_PROJECT_DIR}/README.md", copy=True)
-    .run_commands(
-        f"cd {REMOTE_PROJECT_DIR} && uv sync --dev --frozen",
-    )
-    # Ship full source at container start (fast iteration, no image rebuild)
+    # Bake dependency manifests into the image layer for caching
+    .add_local_file(str(pyproject_local), f"{REMOTE_PROJECT_DIR}/pyproject.toml", copy=True)
+    .add_local_file(str(uv_lock_local), f"{REMOTE_PROJECT_DIR}/uv.lock", copy=True)
+)
+
+# If README exists locally, include it so hatchling readme validation doesn't fail
+if readme_local.exists():
+    image = image.add_local_file(str(readme_local), f"{REMOTE_PROJECT_DIR}/README.md", copy=True)
+
+image = (
+    image.run_commands(f"cd {REMOTE_PROJECT_DIR} && uv sync --dev --frozen")
+    # Ship the whole repo at container startup (fast iteration, no image rebuild)
     .add_local_dir(
         local_path=str(PROJECT_ROOT),
         remote_path=REMOTE_PROJECT_DIR,
