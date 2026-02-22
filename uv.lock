@@ -29,6 +29,7 @@ name = "bastile"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cuda-tile" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -47,11 +48,13 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "liger-kernel" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cuda-tile", specifier = ">=1.1.0" },
     { name = "liger-kernel", marker = "extra == 'bench'", specifier = ">=0.5.0" },
     { name = "liger-kernel", marker = "extra == 'dev'", specifier = ">=0.5.0" },
     { name = "matplotlib", marker = "extra == 'bench'", specifier = ">=3.8.0" },
@@ -64,7 +67,10 @@ requires-dist = [
 provides-extras = ["dev", "bench"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = ">=0.15.1" }]
+dev = [
+    { name = "liger-kernel", specifier = ">=0.5.0" },
+    { name = "ruff", specifier = ">=0.15.1" },
+]
 
 [[package]]
 name = "certifi"
@@ -188,6 +194,22 @@ version = "1.3.4"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/5e/db279a3bfbd18d59d0598922a3b3c1454908d0969e8372260afec9736376/cuda_pathfinder-1.3.4-py3-none-any.whl", hash = "sha256:fb983f6e0d43af27ef486e14d5989b5f904ef45cedf40538bfdcbffa6bb01fb2", size = 30878, upload-time = "2026-02-11T18:50:31.008Z" },
+]
+
+[[package]]
+name = "cuda-tile"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/a0/0ba0cc999197bd35e1865418c92fbf5bac39510e2f79d33963b92b044235/cuda_tile-1.1.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:b5a777cfa88411ee12a77440f015ef5136a3c70208391f00626dd3f83bcdbb65", size = 186624, upload-time = "2026-01-30T06:34:00.589Z" },
+    { url = "https://files.pythonhosted.org/packages/66/ca/6b4e9e3d16e123ebd304399e4d45d6379cbebdf2da2acc091e5004c5817f/cuda_tile-1.1.0-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:35b3e6a9368390339211ed7f1ee3416a829a44d1c1b335ef0df814a6e6ff4902", size = 187946, upload-time = "2026-01-30T06:33:53.716Z" },
+    { url = "https://files.pythonhosted.org/packages/31/3b/65b56adbe045ae77003597fbffd5caacc5a49168e9efa3e0db8b28aa1b19/cuda_tile-1.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:a38e09f6335a93fa94a41c07f3cf9f6089f75eeafce77443cf7e30bf1abadbab", size = 182069, upload-time = "2026-01-30T06:34:27.028Z" },
+    { url = "https://files.pythonhosted.org/packages/12/ca/195f8d675d662fe8d88cd497e2e3ca5d9792e087b3ada8f86ddc073b4a0c/cuda_tile-1.1.0-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:9008968989e83ffe705c9c8ac0d3fb4d9218fd98468eeff85f50b1ecc062d4c9", size = 186625, upload-time = "2026-01-30T06:34:16.082Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/c7/e08882109e672c9d7b6fd980949df07757479254ba86aa8cb1df8741b5a0/cuda_tile-1.1.0-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:2758aac91c7c5a9cdacd39c44c2876aa8cb96d72a8a861fbe240c50b5e9ba235", size = 187951, upload-time = "2026-01-30T06:34:09.031Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/e6/e216f82c4288b4a01e97f886080ca9fdc19233d8c153484e963b1f40c389/cuda_tile-1.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:52458f9329fed18630fc16505d7a21462481ad98ce2bb91a88a38fe943a831a9", size = 182076, upload-time = "2026-01-30T06:34:35.225Z" },
 ]
 
 [[package]]
