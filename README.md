@@ -29,7 +29,7 @@ pip install bastile
 ```
 
 **Prerequisites:**
-- NVIDIA Blackwell GPU (B200, B100, GB200)
+- NVIDIA Blackwell GPU (B200, B100, GB200 or RTX 50 Series Chip)
 - CUDA Toolkit **13.1+**
 - PyTorch 2.9+ with CUDA support
 
