@@ -1,13 +1,5 @@
-"""
-Bastile Benchmarks
+"""Bastile benchmark helpers and entrypoints."""
 
-Structure:
-- kernel/  : Individual kernel benchmarks vs PyTorch
-- e2e/     : End-to-end training benchmarks with patched models
-- utils.py : Shared utilities for benchmarking
-"""
-
-from . import e2e, kernel
 from .utils import (
     E2EBenchmarkResult,
     KernelBenchmarkResult,
@@ -22,11 +14,15 @@ from .utils import (
 
 def run_all_kernel_benchmarks():
     """Run all kernel benchmarks."""
+    from . import kernel
+
     kernel.run_all()
 
 
 def run_all_e2e_benchmarks():
     """Run all e2e benchmarks."""
+    from . import e2e
+
     e2e.run_all()
 
 
@@ -51,10 +47,8 @@ __all__ = [
     "benchmark_fn",
     "benchmark_fn_with_stats",
     "clear_cuda_state",
-    "e2e",
     "get_gpu_info",
     "get_peak_bandwidth",
-    "kernel",
     "run_all",
     "run_all_e2e_benchmarks",
     "run_all_kernel_benchmarks",

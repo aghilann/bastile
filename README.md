@@ -6,6 +6,8 @@ Drop-in monkey-patch that replaces HuggingFace Qwen3 ops with optimized **CuTile
 
 ## Benchmarks
 
+Current published benchmark focus is Qwen3. Bastile's optimized training path and the benchmark claims below are based on the Qwen3 kernels shown here.
+
 Qwen3-8B (36 layers, 4096 hidden, 32 heads) — single B200, batch_size=1, bf16, AdamW:
 
 ### Throughput (tokens/sec)
@@ -21,6 +23,12 @@ Qwen3-8B (36 layers, 4096 hidden, 32 heads) — single B200, batch_size=1, bf16,
 ![Latency](assets/bench_8b_latency.png)
 
 Bastile's fused linear cross-entropy avoids materializing the full `[batch * seq_len, vocab_size]` logits tensor, which is the dominant memory cost at longer sequences. This is where the memory savings and throughput gains compound.
+
+### Qwen3.5 Status
+
+Qwen3.5 support is still a work in progress.
+
+The checked-in Qwen3.5 benchmark plots are provisional and are generated from the older Qwen3 optimization path, not from new Qwen3.5-specific kernel work. Treat them as placeholder reference numbers only, not as finalized Qwen3.5 performance claims.
 
 ## Installation
 
@@ -130,14 +138,14 @@ bastile.clear_autotune_cache()   # Clear kernel caches
 ## Running Benchmarks
 
 ```bash
-# Qwen3-8B sequence length sweep (parallel on 3 GPUs)
-make bench-8b
+# Qwen3-8B sweep
+make bench-3-8b
 
-# Qwen3-8B sweep (sequential, single GPU)
-make bench-8b-seq
+# Qwen3-0.6B sweep
+make bench-0.6b
 
-# Qwen3-8B FSDP multi-GPU benchmark
-make bench-fsdp
+# Qwen3.5-9B sweep (WIP, placeholder numbers currently reflect older Qwen3 optimizations)
+make bench-3.5-9b
 
 # Kernel micro-benchmarks
 make bench-rmsnorm

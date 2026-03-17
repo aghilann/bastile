@@ -5,6 +5,7 @@ Common functions used across kernel and e2e benchmarks.
 """
 
 import gc
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,8 +13,32 @@ from dataclasses import dataclass
 import torch
 
 
+def ensure_cuda_available() -> None:
+    """Raise a concise, actionable error when CUDA runtime init is unavailable."""
+    if not torch.backends.cuda.is_built():
+        raise RuntimeError("PyTorch in this environment was built without CUDA support.")
+
+    # Force runtime initialization so failures surface once with a clearer message.
+    try:
+        torch.cuda.current_device()
+        return
+    except Exception as exc:
+        env_keys = ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "LD_LIBRARY_PATH")
+        env_summary = ", ".join(f"{key}={os.environ.get(key)!r}" for key in env_keys)
+        raise RuntimeError(
+            "CUDA is not usable from this Python process. "
+            f"torch={torch.__version__}, torch.version.cuda={torch.version.cuda}, "
+            f"device_count={torch.cuda.device_count()}, {env_summary}. "
+            "If you are running in Docker, start the container with GPU access "
+            "(for example `--gpus all`) and verify the NVIDIA container runtime is installed. "
+            "On bare metal, verify the NVIDIA driver is loaded and that "
+            "`python -c 'import torch; print(torch.cuda.is_available())'` returns True."
+        ) from exc
+
+
 def get_gpu_info() -> dict:
     """Get GPU information."""
+    ensure_cuda_available()
     props = torch.cuda.get_device_properties(0)
     return {
         "name": props.name,
@@ -25,6 +50,7 @@ def get_gpu_info() -> dict:
 
 def get_peak_bandwidth() -> float:
     """Get theoretical peak memory bandwidth for current GPU in GB/s."""
+    ensure_cuda_available()
     props = torch.cuda.get_device_properties(0)
     name = props.name.lower()
     if "b200" in name:
@@ -41,6 +67,7 @@ def get_peak_bandwidth() -> float:
 
 def clear_cuda_state():
     """Clear CUDA memory and garbage collect."""
+    ensure_cuda_available()
     torch.cuda.empty_cache()
     gc.collect()
     torch.cuda.synchronize()
@@ -48,11 +75,13 @@ def clear_cuda_state():
 
 def reset_peak_memory():
     """Reset peak memory stats."""
+    ensure_cuda_available()
     torch.cuda.reset_peak_memory_stats()
 
 
 def get_peak_memory_gb() -> float:
     """Get peak memory allocated in GB."""
+    ensure_cuda_available()
     return torch.cuda.max_memory_allocated() / 1024**3
 
 
@@ -72,6 +101,7 @@ def benchmark_fn(
     Returns:
         Median latency in microseconds
     """
+    ensure_cuda_available()
     # Warmup
     for _ in range(warmup):
         fn()
@@ -105,6 +135,7 @@ def benchmark_fn_with_stats(
     Returns:
         Dict with median, mean, min, max, p95, p99 latencies in microseconds
     """
+    ensure_cuda_available()
     # Warmup
     for _ in range(warmup):
         fn()
@@ -144,11 +175,13 @@ class Timer:
         self.end_time = None
 
     def __enter__(self):
+        ensure_cuda_available()
         torch.cuda.synchronize()
         self.start_time = time.perf_counter()
         return self
 
     def __exit__(self, *args):
+        ensure_cuda_available()
         torch.cuda.synchronize()
         self.end_time = time.perf_counter()
 

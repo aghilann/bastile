@@ -170,11 +170,11 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 class CuTileSwiGLUMLP(nn.Module):
     """Drop-in replacement for Qwen3MLP using CuTile SwiGLU."""
 
-    def __init__(self, config):
+    def __init__(self, config, intermediate_size=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
+        self.intermediate_size = config.intermediate_size if intermediate_size is None else intermediate_size
 
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)

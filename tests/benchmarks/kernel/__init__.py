@@ -1,16 +1,22 @@
-"""
-Kernel benchmarks - individual kernel performance vs PyTorch.
+"""Kernel benchmarks - individual kernel performance vs PyTorch."""
 
-Benchmarks:
-- rms_norm: RMSNorm kernel
-- swiglu: SwiGLU activation kernel
-- rope: Rotary Position Embedding
-- bench_fused_lce: Fused Linear Cross-Entropy
-"""
 
-from .rms_norm import main as benchmark_rms_norm
-from .rope import main as benchmark_rope
-from .swiglu import main as benchmark_swiglu
+def benchmark_rms_norm():
+    from .rms_norm import main
+
+    return main()
+
+
+def benchmark_rope():
+    from .rope import main
+
+    return main()
+
+
+def benchmark_swiglu():
+    from .swiglu import main
+
+    return main()
 
 
 def run_all():

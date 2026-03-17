@@ -8,9 +8,120 @@ import importlib
 import logging
 from typing import Any
 
-from .registry import PatchInfo, get_registry
+import torch
+from torch import nn
+
+from .registry import PatchInfo, clone_patch, get_registry, register_patch
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_qwen3_5_compat_patches_registered() -> None:
+    """Register Qwen3.5 aliases for the existing CuTile kernels."""
+    registry = get_registry()
+
+    if registry.get("rope_qwen3_5") is None:
+        clone_patch(
+            "rope_qwen3",
+            name="rope_qwen3_5",
+            description="CuTile RoPE for Qwen3.5 models",
+            target_module="transformers.models.qwen3_5.modeling_qwen3_5",
+            target_attr="apply_rotary_pos_emb",
+            models=["qwen3_5"],
+        )
+
+    if registry.get("swiglu_qwen3_5") is None:
+        clone_patch(
+            "swiglu_qwen3",
+            name="swiglu_qwen3_5",
+            description="CuTile SwiGLU MLP with fast math for Qwen3.5",
+            target_module="transformers.models.qwen3_5.modeling_qwen3_5",
+            target_attr="Qwen3_5MLP",
+            models=["qwen3_5"],
+        )
+
+    if registry.get("rms_norm_qwen3_5") is None:
+        from .ops.rms_norm import rms_norm
+
+        class CuTileQwen3_5RMSNorm(nn.Module):
+            """Qwen3.5 RMSNorm wrapper backed by the existing CuTile kernel."""
+
+            def __init__(self, dim: int, eps: float = 1e-6):
+                super().__init__()
+                self.eps = eps
+                self.weight = nn.Parameter(torch.zeros(dim))
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return rms_norm(x, 1.0 + self.weight, self.eps)
+
+            def extra_repr(self) -> str:
+                return f"{tuple(self.weight.shape)}, eps={self.eps}"
+
+        register_patch(
+            name="rms_norm_qwen3_5",
+            description="CuTile RMSNorm for Qwen3.5 (preserves 1 + weight semantics)",
+            target_module="transformers.models.qwen3_5.modeling_qwen3_5",
+            target_attr="Qwen3_5RMSNorm",
+            replacement=CuTileQwen3_5RMSNorm,
+            has_backward=True,
+            priority=10,
+            models=["qwen3_5"],
+        )
+
+
+def _bastile_lce_forward_qwen3_5(
+    self,
+    input_ids=None,
+    attention_mask=None,
+    position_ids=None,
+    past_key_values=None,
+    inputs_embeds=None,
+    labels=None,
+    use_cache=None,
+    logits_to_keep=0,
+    **kwargs,
+):
+    from .ops.fused_linear_cross_entropy import fused_linear_cross_entropy
+
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        use_cache=use_cache,
+        **kwargs,
+    )
+
+    hidden_states = outputs.last_hidden_state
+    logits = None
+    loss = None
+
+    if self.training and labels is not None:
+        shift_hidden = hidden_states[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        loss = fused_linear_cross_entropy(
+            shift_hidden,
+            self.lm_head.weight,
+            shift_labels,
+            bias=getattr(self.lm_head, "bias", None),
+            ignore_index=-100,
+        )
+    else:
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+    from transformers.modeling_outputs import CausalLMOutputWithPast
+
+    return CausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+    )
 
 
 def _import_module(module_path: str):
@@ -103,6 +214,8 @@ def apply(
     """
     from . import ops  # noqa: F401
 
+    _ensure_qwen3_5_compat_patches_registered()
+
     registry = get_registry()
 
     patch_filter = {
@@ -132,18 +245,32 @@ def apply(
             applied.append(patch.name)
 
     # Apply fused linear cross-entropy if requested
-    # This patches Qwen3ForCausalLM.forward to skip logits materialization
+    # This patches Qwen3/Qwen3.5 ForCausalLM.forward to skip logits materialization
     if fused_linear_cross_entropy:
-        try:
-            import transformers.models.qwen3.modeling_qwen3 as qwen3_module
+        lce_targets = [
+            ("qwen3", "transformers.models.qwen3.modeling_qwen3", "Qwen3ForCausalLM", "bastile_lce_forward"),
+            (
+                "qwen3_5",
+                "transformers.models.qwen3_5.modeling_qwen3_5",
+                "Qwen3_5ForCausalLM",
+                "_bastile_lce_forward_qwen3_5",
+            ),
+        ]
 
-            from .ops.fused_linear_cross_entropy import bastile_lce_forward
-
-            qwen3_module.Qwen3ForCausalLM.forward = bastile_lce_forward
-            applied.append("fused_linear_cross_entropy")
-            logger.info("Applied fused linear cross-entropy (skips logits materialization)")
-        except Exception as e:
-            logger.warning(f"Could not apply fused linear cross-entropy: {e}")
+        for target_model_type, module_path, class_name, forward_name in lce_targets:
+            if model_type and model_type != target_model_type:
+                continue
+            try:
+                module = importlib.import_module(module_path)
+                replacement = globals()[forward_name]
+                getattr(module, class_name).forward = replacement
+                applied.append(f"fused_linear_cross_entropy_{target_model_type}")
+                logger.info(
+                    "Applied fused linear cross-entropy for %s (skips logits materialization)",
+                    target_model_type,
+                )
+            except Exception as e:
+                logger.warning(f"Could not apply fused linear cross-entropy for {target_model_type}: {e}")
 
     # Warmup kernels to avoid JIT overhead during training
     try:
