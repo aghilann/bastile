@@ -30,6 +30,20 @@ Qwen3.5 support is still a work in progress.
 
 The checked-in Qwen3.5 benchmark plots are provisional and are generated from the older Qwen3 optimization path, not from new Qwen3.5-specific kernel work. Treat them as placeholder reference numbers only, not as finalized Qwen3.5 performance claims.
 
+Qwen3.5-9B (32 layers, 4096 hidden, 16 heads) — single B200, batch_size=1, bf16, AdamW:
+
+### Qwen3.5 Throughput (tokens/sec)
+
+![Qwen3.5 Throughput](assets/bench_qwen3_5_9b_throughput.png)
+
+### Qwen3.5 Peak GPU Memory (GB)
+
+![Qwen3.5 Memory](assets/bench_qwen3_5_9b_memory.png)
+
+### Qwen3.5 Latency (ms/iter)
+
+![Qwen3.5 Latency](assets/bench_qwen3_5_9b_latency.png)
+
 ## Installation
 
 ```bash
