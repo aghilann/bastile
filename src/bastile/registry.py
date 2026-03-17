@@ -132,6 +132,33 @@ def register_patch(
     )
 
 
+def clone_patch(
+    source_name: str,
+    *,
+    name: str,
+    target_module: str | None = None,
+    target_attr: str | None = None,
+    models: list[str] | None = None,
+    description: str | None = None,
+    priority: int | None = None,
+) -> None:
+    """Register a new patch entry by copying an existing one."""
+    source = _registry.get(source_name)
+    if source is None:
+        raise KeyError(f"Patch '{source_name}' is not registered")
+
+    _registry.register(
+        name=name,
+        description=description or source.description,
+        target_module=target_module or source.target_module,
+        target_attr=target_attr or source.target_attr,
+        replacement=source.replacement,
+        has_backward=source.has_backward,
+        priority=source.priority if priority is None else priority,
+        models=source.models if models is None else models,
+    )
+
+
 def list_patches() -> list[str]:
     """List all registered patches."""
     return _registry.list_all()

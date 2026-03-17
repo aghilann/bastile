@@ -138,7 +138,18 @@ class RoPEFunction(torch.autograd.Function):
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """HuggingFace-compatible rotary position embedding using CuTile."""
-    return RoPEFunction.apply(q, k, cos, sin, position_ids, unsqueeze_dim)
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    q_embed, k_embed = RoPEFunction.apply(q_rot, k_rot, cos, sin, position_ids, unsqueeze_dim)
+
+    if q_pass.numel():
+        q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    if k_pass.numel():
+        k_embed = torch.cat([k_embed, k_pass], dim=-1)
+
+    return q_embed, k_embed
 
 
 register_patch(
