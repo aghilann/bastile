@@ -24,20 +24,4 @@ def run_all():
     print("=" * 80)
 
 
-__all__ = [
-    "benchmark_qwen3",
-    "benchmark_qwen3_5",
-    "run_all",
-]
-
-
-def benchmark_qwen3():
-    from .qwen3_seqlen import main
-
-    return main()
-
-
-def benchmark_qwen3_5():
-    from .qwen3_5_seqlen import main
-
-    return main()
+__all__ = ["run_all"]

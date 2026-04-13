@@ -124,49 +124,6 @@ def benchmark_fn(
     return times[len(times) // 2]  # Median
 
 
-def benchmark_fn_with_stats(
-    fn: Callable,
-    warmup: int = 50,
-    iterations: int = 100,
-) -> dict:
-    """
-    Benchmark a function and return detailed statistics.
-
-    Returns:
-        Dict with median, mean, min, max, p95, p99 latencies in microseconds
-    """
-    ensure_cuda_available()
-    # Warmup
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-
-    # Timed runs
-    times = []
-    for _ in range(iterations):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
-        start.record()
-        fn()
-        end.record()
-
-        torch.cuda.synchronize()
-        times.append(start.elapsed_time(end) * 1000)  # ms to us
-
-    times.sort()
-    n = len(times)
-
-    return {
-        "median_us": times[n // 2],
-        "mean_us": sum(times) / n,
-        "min_us": times[0],
-        "max_us": times[-1],
-        "p95_us": times[int(n * 0.95)],
-        "p99_us": times[int(n * 0.99)],
-    }
-
-
 class Timer:
     """Context manager for timing code blocks."""
 

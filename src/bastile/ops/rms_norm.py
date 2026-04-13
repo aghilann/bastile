@@ -173,14 +173,6 @@ def rms_norm(x, weight, eps=1e-6, **_kw):
     return CuTileRMSNormFunction.apply(x, weight, eps)
 
 
-def warmup_rms_norm(hidden_size: int, dtype=torch.bfloat16, device="cuda"):
-    """JIT-compile kernels for *hidden_size*."""
-    x = torch.randn(2, hidden_size, dtype=dtype, device=device, requires_grad=True)
-    w = torch.ones(hidden_size, dtype=dtype, device=device, requires_grad=True)
-    rms_norm(x, w, 1e-6).sum().backward()
-    torch.cuda.synchronize()
-
-
 register_patch(
     name="rms_norm_qwen3",
     description="CuTile RMSNorm for Qwen3 (persistent fwd + persistent bwd)",
@@ -190,4 +182,39 @@ register_patch(
     has_backward=True,
     priority=10,
     models=["qwen3"],
+)
+
+
+class CuTileGemma4RMSNorm(nn.Module):
+    """Drop-in Gemma4RMSNorm using cuTILE persistent kernels.
+
+    Handles the ``with_scale=False`` variant by registering a fixed
+    all-ones buffer so the same kernel path is always used.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6, with_scale: bool = True):
+        super().__init__()
+        self.variance_epsilon = eps
+        self.with_scale = with_scale
+        if with_scale:
+            self.weight = nn.Parameter(torch.ones(dim))
+        else:
+            self.register_buffer("weight", torch.ones(dim), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return CuTileRMSNormFunction.apply(x, self.weight, self.variance_epsilon)
+
+    def extra_repr(self) -> str:
+        return f"{self.weight.shape[0]}, eps={self.variance_epsilon}, with_scale={self.with_scale}"
+
+
+register_patch(
+    name="rms_norm_gemma4",
+    description="CuTile RMSNorm for Gemma4 (persistent fwd + persistent bwd)",
+    target_module="transformers.models.gemma4.modeling_gemma4",
+    target_attr="Gemma4RMSNorm",
+    replacement=CuTileGemma4RMSNorm,
+    has_backward=True,
+    priority=10,
+    models=["gemma4"],
 )

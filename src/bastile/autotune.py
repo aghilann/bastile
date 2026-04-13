@@ -1,5 +1,6 @@
 """Kernel warmup and cache management for Bastile."""
 
+import logging
 from pathlib import Path
 
 import torch
@@ -54,6 +55,4 @@ def warmup_all_kernels(
         torch.cuda.synchronize()
 
     except Exception as e:
-        import logging
-
         logging.debug(f"Warmup skipped: {e}")

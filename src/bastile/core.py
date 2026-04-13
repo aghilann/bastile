@@ -247,22 +247,29 @@ def apply(
     # Apply fused linear cross-entropy if requested
     # This patches Qwen3/Qwen3.5 ForCausalLM.forward to skip logits materialization
     if fused_linear_cross_entropy:
+        from .ops.fused_linear_cross_entropy import bastile_lce_forward
+
         lce_targets = [
-            ("qwen3", "transformers.models.qwen3.modeling_qwen3", "Qwen3ForCausalLM", "bastile_lce_forward"),
+            ("qwen3", "transformers.models.qwen3.modeling_qwen3", "Qwen3ForCausalLM", bastile_lce_forward),
             (
                 "qwen3_5",
                 "transformers.models.qwen3_5.modeling_qwen3_5",
                 "Qwen3_5ForCausalLM",
-                "_bastile_lce_forward_qwen3_5",
+                _bastile_lce_forward_qwen3_5,
+            ),
+            (
+                "gemma3_text",
+                "transformers.models.gemma3.modeling_gemma3",
+                "Gemma3ForCausalLM",
+                bastile_lce_forward,
             ),
         ]
 
-        for target_model_type, module_path, class_name, forward_name in lce_targets:
+        for target_model_type, module_path, class_name, replacement in lce_targets:
             if model_type and model_type != target_model_type:
                 continue
             try:
                 module = importlib.import_module(module_path)
-                replacement = globals()[forward_name]
                 getattr(module, class_name).forward = replacement
                 applied.append(f"fused_linear_cross_entropy_{target_model_type}")
                 logger.info(
