@@ -8,8 +8,7 @@ Benchmark: Fused Linear Cross-Entropy — Speed + Peak Memory
 import torch
 import torch.nn.functional as F
 
-from ..utils import benchmark_fn as _benchmark_fn_us
-from ..utils import clear_cuda_state
+from ..utils import benchmark_fn, clear_cuda_state
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -18,11 +17,6 @@ H, V = 4096, 151936
 BT_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 device = "cuda"
 dtype = torch.bfloat16
-
-
-def benchmark_fn(fn, warmup=5, iters=20):
-    """Benchmark returning milliseconds (trimmed mean)."""
-    return _benchmark_fn_us(fn, warmup=warmup, iterations=iters) / 1000.0
 
 
 def measure_peak_memory(fn, warmup=3):
@@ -102,7 +96,7 @@ for BT in BT_sizes:
     results = {}
     for name, fn in [("PyTorch", run_pytorch), ("Bastile", run_bastile), ("Liger", run_liger)]:
         try:
-            results[name] = benchmark_fn(fn)
+            results[name] = benchmark_fn(fn, warmup=5, iterations=20) / 1000.0
         except Exception as e:
             print(f"  {name} OOM/error @ BT={BT}: {type(e).__name__}")
             results[name] = float("inf")

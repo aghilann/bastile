@@ -4,6 +4,7 @@ Bastile Operations - kernel implementations with backward passes.
 Supported models:
 - Qwen3: RMSNorm (CuTile), SwiGLU (CuTile), RoPE (CuTile),
          Fused Linear Cross-Entropy (CuTile)
+- Gemma4: RMSNorm (CuTile)
 
 This module automatically registers all available patches when imported.
 """
