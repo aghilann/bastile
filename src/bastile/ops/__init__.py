@@ -13,7 +13,8 @@ from . import (
     fused_linear_cross_entropy,  # CuTile Fused Linear Cross-Entropy
     rms_norm,  # CuTile RMSNorm (persistent fwd + persistent bwd)
     rope,  # CuTile RoPE
+    sparse_attn,  # CuTile sparse attention (top-k KV gather + online softmax)
     swiglu,  # CuTile SwiGLU
 )
 
-__all__ = ["fused_linear_cross_entropy", "rms_norm", "rope", "swiglu"]
+__all__ = ["fused_linear_cross_entropy", "rms_norm", "rope", "sparse_attn", "swiglu"]
